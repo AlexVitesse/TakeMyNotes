@@ -1908,7 +1908,10 @@ class Widget:
                                        "terminar.\n¿Cerrar igual?\n\nEl audio queda en disco: se "
                                        "reintentan solas la próxima vez que abras la app."):
                 return
-        self.root.destroy()
+        # after_idle y no destroy() directo: _quit corre dentro del <Button-1> de un item del
+        # canvas, y destruir el canvas mientras Tk despacha ese evento corrompe la memoria de
+        # Tcl ("alloc: invalid block", la app se cae con código 3 al cerrar con la ✕).
+        self.root.after_idle(self.root.destroy)
 
     def _round(self, x1, y1, x2, y2, r, **kw):
         p = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
