@@ -1,0 +1,9 @@
+# Pineado a lo probado: un soundcard o pywebview nuevo puede romper la captura de
+# loopback o el js_api. Subir a mano y volver a correr build.bat, no a ciegas.
+soundcard==0.4.6
+numpy==2.2.6
+groq==0.37.1
+openai==1.99.1           # solo para Gemini: su endpoint es compatible con el de OpenAI,
+                          # pero el SDK de groq arma otra ruta y le devuelve 404
+pywebview==6.2.1
+pillow==12.1.0            # solo ImageGrab, para las capturas de pantalla del widget

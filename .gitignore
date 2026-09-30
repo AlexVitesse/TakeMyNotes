@@ -1,0 +1,27 @@
+# secretos y config local
+.env
+settings.json
+
+# datos del usuario
+notas/
+*.wav
+
+# build
+build/
+dist/
+# el .spec lo regenera pyinstaller en cada build; build.bat es la fuente de verdad
+*.spec
+
+# runtime
+*.log
+__pycache__/
+*.pyc
+
+# venv del build
+.venv/
+
+# accion widget -> ventana
+.action
+
+# config local de Claude Code
+.claude/settings.local.json

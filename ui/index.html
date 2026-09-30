@@ -1,0 +1,623 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="app.css"></head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <button id="gear" class="iconbtn" title="Configuración">⚙</button>
+    <button id="pill" class="iconbtn" title="Mostrar el widget de grabación">🎙</button>
+    <span class="title">TakeMyNotes</span>
+    <span class="spacer"></span>
+    <span id="status" class="status"></span>
+  </div>
+  <div class="body">
+    <div class="side">
+      <div class="search">
+        <input id="q" placeholder="Buscar en las sesiones…">
+        <button id="favf" class="favf" title="Ver solo favoritos">★</button>
+      </div>
+      <div id="list"></div>
+    </div>
+    <div id="detail" class="detail"></div>
+  </div>
+</div>
+
+<div id="menu" class="menu">
+  <button class="favitem" onclick="menuAct('fav')">★ Marcar favorito</button>
+  <button onclick="menuAct('rename')">Renombrar</button>
+  <button onclick="menuAct('del')" class="danger">Eliminar</button>
+</div>
+
+<!-- Confirmación propia y no confirm(): el diálogo nativo depende de que WebView2 permita
+     script dialogs, bloquea el hilo de la vista y se ve como una alerta del sistema. -->
+<div id="cmask" class="mask"><div class="modal">
+  <h3 id="ctitle"></h3>
+  <div class="hint" id="ctext"></div>
+  <div class="mrow">
+    <button class="pill ghost" onclick="closeConfirm()">Cancelar</button>
+    <button class="pill danger" id="cyes" onclick="confirmYes()">Eliminar</button>
+  </div>
+</div></div>
+
+<div id="mask" class="mask"><div class="modal">
+  <h3>Configuración</h3>
+  <div class="row toggle">
+    <div><label>Guardar audio</label><div class="hint">Queda el .wav de cada sesión para poder
+      auditarla (~110 MB por hora). Se escucha y se borra desde la pestaña Info.</div></div>
+    <div id="sw" class="sw"></div>
+  </div>
+  <div class="row toggle">
+    <div><label>Identificar hablantes</label><div class="hint">Etiqueta "Yo" vs "Los demás" (2 llamadas a Groq).</div></div>
+    <div id="sw2" class="sw"></div>
+  </div>
+  <div class="row toggle">
+    <div><label>Tema</label><div class="hint">Auto sigue el tema de Windows.</div></div>
+    <div id="themes" class="seg tight">
+      <button data-t="auto" onclick="setTheme('auto')">Auto</button>
+      <button data-t="light" onclick="setTheme('light')">Claro</button>
+      <button data-t="dark" onclick="setTheme('dark')">Oscuro</button>
+    </div>
+  </div>
+  <div class="row">
+    <label>Tu nombre</label>
+    <input id="me" type="text" placeholder="Eric" maxlength="24">
+    <div class="hint">Etiqueta tus turnos con tu nombre en vez de «Yo», y marca cuando los demás
+      te mencionan. Se aplica a las sesiones nuevas.</div>
+  </div>
+  <div class="row">
+    <label>API key de Groq</label>
+    <input id="key" type="password" placeholder="gsk_…">
+    <div class="hint">Transcribe y, si no pones la de abajo, también resume.
+      Se guarda cifrada (DPAPI) en settings.json.</div>
+  </div>
+  <div class="row">
+    <label>API key de Gemini <span class="opt">opcional, para el resumen</span></label>
+    <input id="gkey" type="password" placeholder="AIza…">
+    <div class="warn">Con el plan gratuito de Gemini, Google usa lo que le mandes —
+      la transcripción completa de la reunión y el resumen — para entrenar sus productos, y
+      revisores humanos pueden leerlo. No la pongas si en tus reuniones se habla de clientes,
+      cifras o cualquier cosa que no publicarías. En el plan de pago de Google eso no pasa.</div>
+    <div class="hint">A cambio, la reunión entra entera en una sola pasada en vez de resumirse
+      por tramos: mejoran los descartes, los acuerdos del cierre y quién dijo qué.
+      No hay que elegir proveedor: con las dos puestas se resume con Gemini y, si un día no
+      puede (se acabó la cuota, se cayó), lo rehace Groq solo y la reunión no se queda sin acta.
+      Se guarda cifrada igual que la de Groq. Vaciar el campo no la borra: usa Quitar.</div>
+  </div>
+  <div class="row">
+    <label>Modelo para los resúmenes <span class="opt">opcional</span></label>
+    <input id="cmodel" type="text" maxlength="64" placeholder="">
+    <div class="hint">Vacío usa el del proveedor activo. El plan gratuito de Gemini da unos
+      20 resúmenes al día <b>por modelo</b>: si se agota uno, cambiá el nombre acá y seguís
+      (gemini-3.7-flash, gemini-3.5-flash, gemini-2.5-flash…). También sirve cuando retiran un
+      modelo, sin tocar código. Probar valida que exista.</div>
+  </div>
+  <div class="mrow">
+    <span id="smsg" class="msg"></span>
+    <button class="pill ghost sm" id="delg" onclick="dropGemini()">Quitar Gemini</button>
+    <button class="pill ghost" onclick="cancelSettings()">Cancelar</button>
+    <button class="pill ghost" onclick="testKey()">Probar</button>
+    <button class="pill" onclick="saveSettings()">Guardar</button>
+  </div>
+</div></div>
+
+<script>
+const $=s=>document.querySelector(s);
+let sessions=[], cur=null, tab='summary', keepAudio=false, labelSp=true, query='';
+let theme='auto', saved={}, related=null, favOnly=false, myName='';
+
+function setStatus(t){$('#status').textContent=t||'';}
+// También " y ': así lo mismo sirve para texto y para dentro de un atributo (las rutas de la
+// pestaña Info viajan por un onclick y una carpeta con apóstrofo cerraría el atributo).
+function esc(s){return (s||'').replace(/[&<>"']/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+const jsarg=v=>esc(JSON.stringify(v||''));   // literal JS seguro dentro de onclick='fn(...)'
+function fmtDur(s){s=s||0;const m=s/60|0;return m?m+' min':s+' s';}
+const fetchSessions=()=>query?pywebview.api.search(query):pywebview.api.list_sessions();
+// Cuándo pasó: si fue hoy alcanza la hora; si fue otro día de este año, el DIA-MES ("07-08");
+// si fue otro año, la fecha completa. La hora sola no dice nada de una reunión de hace 3 días.
+function whenText(s){
+  const now=new Date();
+  const hoy=[now.getFullYear(),now.getMonth()+1,now.getDate()].map(x=>String(x).padStart(2,'0')).join('-');
+  if((s.date||'')===hoy)return s.time;
+  const [y,m,d]=(s.date||'').split('-');
+  if(y===String(now.getFullYear()))return `${d}-${m}`;
+  return s.date;
+}
+function metaText(s){return s.stage?esc(s.stage)                  // "Transcribiendo… 3/12"
+  :s.status==='pending'?'Transcribiendo…'
+  :s.status==='error'?'⚠ Error al transcribir':esc(whenText(s)+' · '+fmtDur(s.dur));}
+const rxesc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');   // el token va dentro de un RegExp
+// Marca los tokens del buscador y, distinto, tu nombre cuando alguien te menciona. Las dos cosas
+// en UNA pasada: un segundo replace sobre HTML ya marcado le pega a los <mark> (Mark es un nombre).
+function highlight(text){
+  const e=esc(text),alt=[];
+  // por palabra, no la frase entera. \p{L} y no \w: el \w de JS es ASCII y partia "reunion" en dos
+  const toks=(query.match(/[\p{L}\p{N}_]+/gu)||[]);
+  if(myName)alt.push('(?<me>'+rxesc(esc(myName))+')');
+  if(toks.length)alt.push('(?<hit>'+toks.map(rxesc).join('|')+')');
+  if(!alt.length)return e;
+  return e.replace(new RegExp(alt.join('|'),'giu'),(m,...a)=>
+    a[a.length-1].me?'<mark class="me">'+m+'</mark>':'<mark>'+m+'</mark>');}
+// "Yo: …" / "Los demás: …" -> [{t, who, text}]. Las sesiones nuevas ya traen s.turns con el
+// segundo de cada turno (lo escribe dialog_turns en Python); las viejas se guardaron antes de
+// que existiera, así que se reconstruyen del texto plano y se quedan sin tiempos (t:null).
+const LBL=/^([^:\n]{1,24}): ([\s\S]+)$/;
+const isMe=l=>l==='Yo'||(!!myName&&l.toLowerCase()===myName.toLowerCase());
+function turnsOf(s){
+  if(s.turns&&s.turns.length)return s.turns;
+  return (s.transcript||'').split('\n\n').filter(b=>b.trim()).map(b=>{
+    const m=b.match(LBL);
+    return m?{t:null,who:m[1],text:m[2]}:{t:null,who:'',text:b};});}
+const mmss=t=>{const s=Math.max(0,Math.round(t));
+  return (s/60|0).toString().padStart(2,'0')+':'+(s%60).toString().padStart(2,'0');};
+// Formato tl;dv: una fila por turno, con el minuto a la izquierda. Clic = el audio salta ahí.
+function turnRows(s){
+  const T=turnsOf(s);
+  // La etiqueta solo cuando CAMBIA de hablante: en una sesión sin alternancia (un solo canal con
+  // audio, o el colapso de eco) todos los turnos son del mismo y repetirla en cada fila es ruido.
+  return T.map((x,i)=>
+    `<div class="turn${isMe(x.who)?' mine':''}${i&&T[i-1].who===x.who?' cont':''}" data-i="${i}"${
+      x.t==null?'':` data-t="${x.t}" onclick="seek(${x.t})"`}>
+       <div class="tt">${x.t==null?'':mmss(x.t)}</div>
+       <div class="tx">${i&&T[i-1].who===x.who?'':
+           `<div class="who">${esc(x.who||'Transcripción')}</div>`}
+         <div class="say">${sayHtml(x.text)}</div></div>
+     </div>`).join('');}
+// Un turno de 42 KB es ilegible aunque el tope de dialog_turns evite que se vuelvan a crear:
+// las sesiones ya transcritas lo tienen fusionado en disco. Se parte en párrafos por final de
+// frase, solo para leer. Los tiempos NO se inventan: el turno sigue siendo uno y conserva el suyo.
+function sayHtml(t){
+  if(t.length<=600)return highlight(t);
+  const parts=[];let cur='';
+  for(const f of t.match(/[^.?!…]+[.?!…]*\s*/g)||[t]){
+    cur+=f;
+    // Whisper a veces devuelve miles de chars sin un solo punto: ahí se corta por el último
+    // espacio, que es feo pero se lee, y un muro de 3 KB no.
+    while(cur.length>=900){const c=cur.lastIndexOf(' ',700)+1||700;
+      parts.push(cur.slice(0,c));cur=cur.slice(c);}
+    if(cur.length>=400){parts.push(cur);cur='';}}
+  if(cur.trim())parts.push(cur);
+  return parts.map(x=>'<p>'+highlight(x.trim())+'</p>').join('');}
+const skel='<div class="skeleton"><div></div><div></div><div></div></div>';   // el CSS asume 3
+const skeleton='<div class="content">'+skel+'</div>';
+// Skeleton = "ya existe, lo estoy leyendo del disco". Spinner = "se está generando ahora":
+// eso tarda minutos y sin decir en qué va parece colgado.
+const spin=t=>`<div class="wait"><span class="spinner"></span><span>${esc(t)}</span></div>`;
+// El modelo responde en markdown: se renderiza el subconjunto que usa, sobre texto YA escapado.
+function md(t){
+  return esc(t||'')
+    .replace(/^#{1,4}\s+(.*)$/gm,'<h4>$1</h4>')
+    // El acta titula sus secciones con una línea suelta en mayúsculas (ACCIONES, DECIDIDO...):
+    // sin esto son texto normal, y con white-space:normal quedan pegadas al párrafo de al lado.
+    .replace(/^([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ0-9 ]{2,40}(?: \([^)\n]{1,40}\))?):?[ \t]*$/gm,
+             '<h4>$1</h4>')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[\s(])\*([^*\n]+?)\*/g,'$1<em>$2</em>')
+    .replace(/`([^`\n]+)`/g,'<code>$1</code>')
+    .replace(/^\s*(?:[-*•]|\d+\.)\s+(.*)$/gm,'<li>$1</li>')
+    .replace(/(?:<li>.*<\/li>\n?)+/g,m=>'<ul>'+m.replace(/\n/g,'')+'</ul>')
+    // white-space:normal se come los saltos, y el acta los usa: una línea por persona en
+    // QUIÉNES, y el responsable encabezando su grupo de acciones. Sin esto, todo eso es un
+    // solo párrafo corrido. Los saltos pegados a un título o a una lista sí sobran.
+    .replace(/\n*(<\/?(?:h4|ul)>)\n*/g,'$1')
+    .replace(/\n/g,'<br>');
+}
+
+async function boot(){
+  const st=await pywebview.api.get_settings();
+  keepAudio=st.keep_audio;labelSp=st.label_speakers;theme=st.theme||'auto';myName=st.name||'';
+  setDark(st.dark);                     // ya resuelto por Python: sin viaje extra ni parpadeo
+  await loadList();
+  if(!st.key_set||await pywebview.api.take_action()==='settings')openSettings();
+  setInterval(poll,2500);
+}
+async function loadList(sel){
+  sessions=await fetchSessions();
+  related=null;
+  renderList();
+  // Sugerencias solo si la consulta ya parece terminada: cada una cuesta una llamada al LLM,
+  // y con el debounce del buscador cada pausa al tipear disparaba una que se tiraba.
+  clearTimeout(rT);
+  if(query.length>=4&&sessions.length<3)rT=setTimeout(()=>relatedSearch(query),1000);
+  if(sel)select(sel);
+  else if(!cur&&sessions.length)select(sessions[0].id);
+  else if(!sessions.length&&!query)renderEmpty();
+  else if(!sessions.length)$('#detail').innerHTML='<div class="empty"><div>Sin resultados</div></div>';
+}
+// Releer la lista sin tocar la selección ni las sugerencias: es lo que corre en el poll, así que
+// no puede reordenar lo que estás leyendo ni disparar otra consulta al LLM.
+async function refreshList(){
+  sessions=await fetchSessions();
+  renderList();
+  if(!cur&&sessions.length)select(sessions[0].id);
+  else if(!sessions.length&&!query)renderEmpty();
+}
+let tick=0,stamp=null;
+async function poll(){
+  // el ⚙ del widget cada 10 s y no cada 2,5: sin nada pendiente el poll no cruza el puente
+  if(tick++%4===0&&await pywebview.api.take_action()==='settings')openSettings();
+  // ¿cambió el contenido de notas/? Un stat contra el mtime de la carpeta. Sin esto, la sesión
+  // que el widget acababa de grabar NO aparecía en la lista hasta reabrir la ventana o buscar:
+  // el poll solo refrescaba las que ya estaban en pantalla.
+  const st=await pywebview.api.notas_stamp();
+  if(st!==stamp){stamp=st;await refreshList();}
+  const pend=sessions.filter(s=>s.status==='pending'||s.stage);   // stage: transcribe o resume
+  // El detalle abierto se relee también cuando la lista ya dice que terminó. Sin esto el ÚLTIMO
+  // tramo se quedaba girando: ese _patch borra el stage y cambia el mtime de notas/, así que
+  // refreshList() traía los metadatos ya limpios, la sesión salía de `pend` y el bucle de abajo
+  // nunca llegaba a refrescar `cur` — "Resumiendo… 3/3" hasta que cambiabas de sesión.
+  if(cur&&(cur.stage||cur.status==='pending')&&!pend.some(p=>p.id===cur.id)){
+    cur=await pywebview.api.get_session(cur.id);renderDetail();}
+  if(!pend.length)return;
+  try{
+    for(const p of pend){
+      const s=await pywebview.api.get_session(p.id);
+      Object.assign(p,{status:s.status,name:s.name,fav:s.fav,stage:s.stage});
+      if(cur&&cur.id===p.id&&JSON.stringify(s)!==JSON.stringify(cur)){cur=s;renderDetail();}
+    }
+  }catch(e){await loadList(cur?cur.id:undefined);return;}   // la borraron: releer todo
+  renderList();
+}
+// Una sesión que se está transcribiendo lleva el skeleton donde iría el texto: se ve de un
+// vistazo, desde la lista, que esa está en proceso y no es que salió vacía.
+const itemHtml=s=>`
+    <div class="sitem ${cur&&cur.id===s.id?'sel':''} ${s.status==='pending'||s.stage?'busy':''}"
+         onclick="select('${s.id}')">
+      <button class="kebab" title="Opciones" onclick="menu(event,'${s.id}')">⋯</button>
+      <div class="nm">${s.fav?'<span class="star">★</span> ':''}${esc(s.name||'Sesión')}</div>
+      <div class="meta ${s.status==='pending'?'pend':''}">${metaText(s)}</div>
+      ${s.status==='pending'||s.stage?skel
+        :s.snip?`<div class="snip">${highlight(s.snip)}</div>`:''}
+    </div>`;
+const visible=()=>sessions.filter(s=>!favOnly||s.fav);
+const findMeta=id=>sessions.find(s=>s.id===id)||(related&&related.hits.find(s=>s.id===id));
+function renderList(){
+  let h=visible().map(itemHtml).join('');
+  if(favOnly&&!h)h='<div class="rel">Sin favoritos todavía</div>';
+  if(related&&related.hits.length)      // sugerencias del buscador, siempre marcadas como tales
+    h+=`<div class="rel">Relacionados con: ${esc(related.terms.join(', '))}</div>`
+      +related.hits.map(itemHtml).join('');
+  $('#list').innerHTML=h;
+}
+let rT;
+async function relatedSearch(q){        // "engaño" cuando en la reunion se dijo "fraude"
+  setStatus('Buscando relacionados…');
+  const r=await pywebview.api.search_related(q,sessions.map(s=>s.id));   // ya los tenemos acá
+  setStatus(r.msg||'');
+  if(q!==query)return;                  // el usuario ya escribio otra cosa
+  related=r;renderList();
+}
+
+// menu ⋯ de cada sesion: renombrar / eliminar sin tener que ir al detalle
+function menu(ev,id){
+  ev.stopPropagation();
+  const m=$('#menu'),r=ev.currentTarget.getBoundingClientRect(),s=findMeta(id)||cur;
+  m.dataset.id=id;m.classList.add('show');
+  m.querySelector('.favitem').textContent=s&&s.fav?'☆ Quitar favorito':'★ Marcar favorito';
+  m.style.left=Math.min(r.right-8,window.innerWidth-m.offsetWidth-8)+'px';
+  m.style.top=Math.min(r.bottom+4,window.innerHeight-m.offsetHeight-8)+'px';
+}
+const closeMenu=()=>$('#menu').classList.remove('show');
+document.addEventListener('click',closeMenu);
+async function menuAct(a){
+  const id=$('#menu').dataset.id;closeMenu();
+  if(a==='fav')return toggleFav(id);
+  if(!cur||cur.id!==id)await select(id);
+  if(a==='del')return del();
+  tab='summary';renderDetail();                  // renombrar: enfocar el titulo y seleccionarlo
+  const el=document.querySelector('.dhead .nm');
+  el.focus();getSelection().selectAllChildren(el);
+}
+function renderEmpty(){
+  cur=null;
+  $('#detail').innerHTML=`<div class="empty"><div style="font-size:44px">🎙️</div>
+    <div class="big">Sin sesiones todavía</div>
+    <div>Usa el widget flotante para grabar tu primera reunión.</div>
+    <div class="actions"><button class="pill" onclick="showWidget()">🎙 Mostrar el widget</button></div>
+    </div>`;
+}
+async function select(id){
+  $('#detail').innerHTML=skeleton;              // no congelar la vista mientras carga
+  cur=await pywebview.api.get_session(id);
+  if(query&&cur.transcript)tab='transcript';    // desde el buscador: al fragmento, no al resumen
+  renderList();renderDetail();
+  if(query)document.querySelector('#pane mark')?.scrollIntoView({block:'center'});}
+
+function renderDetail(){
+  const s=cur;
+  $('#detail').innerHTML=`
+    <div class="dhead">
+      <div class="hrow">
+        <div class="nm" contenteditable="true" spellcheck="false" onblur="rename(this)"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
+             >${esc(s.name||'Sesión')}</div>
+        <button class="iconbtn fav ${s.fav?'on':''}" title="Favorito"
+                onclick="toggleFav()">${s.fav?'★':'☆'}</button>
+        <button class="iconbtn" title="Opciones" onclick="menu(event,'${s.id}')">⋯</button>
+      </div>
+      <div class="meta">${esc(s.date+' · '+s.time+' · '+fmtDur(s.dur))}</div>
+    </div>
+    ${s.warn?`<div class="warn">⚠ Aviso: ${esc(s.warn)}. Revisa tu dispositivo la próxima vez.</div>`:''}
+    <div class="seg">
+      ${seg('summary','Resumen')}${seg('transcript','Transcripción')}
+      ${seg('media','Media'+(((s.paths||{}).shots||[]).length?' •':''))}
+      ${seg('notes','Notas'+(s.notes?' •':''))}${seg('chat','Chat'+(s.chat&&s.chat.length?' •':''))}
+      ${seg('info','Info')}
+    </div>
+    <div id="pane" class="content"></div>
+    <div id="chatbar"></div>`;
+  renderPane();
+}
+const seg=(k,l)=>`<button class="${tab===k?'on':''}" onclick="setTab('${k}')">${l}</button>`;
+function setTab(t){tab=t;renderDetail();}
+
+function renderPane(){
+  const s=cur,p=$('#pane'),cb=$('#chatbar');cb.innerHTML='';p.className='content';
+  if(tab==='transcript'){
+    if(s.status==='pending')p.innerHTML=skel+spin(s.stage||'Transcribiendo…');
+    else if(s.status==='error')p.innerHTML=`<div class="warn">No se pudo transcribir: ${esc(s.error)}</div>
+      <div class="actions"><button class="pill" onclick="retry()">Reintentar</button></div>`;
+    else if(!s.transcript)p.innerHTML='(vacío)';
+    else{
+      const url=(s.paths||{}).audio_url,T=turnsOf(s),sync=T.some(x=>x.t!=null);
+      p.className='content turns';
+      // El reproductor va pegado arriba del texto: es lo que permite seguir la conversación
+      // leyendo. Se sirve por HTTP desde notas/ (ver start_media_server en Python).
+      // Sin tiempos por turno (sesión anterior a esta versión) no hay nada que resaltar, y hay
+      // que decirlo: si no, el audio suena y el texto no se mueve y parece que está roto.
+      p.innerHTML=(url?`<div class="player"><audio id="pl" controls preload="metadata"
+          src="${esc(url)}"></audio></div>`:'')
+        +(url&&!sync?`<div class="nosync"><span>Esta sesión se transcribió antes de que se
+             guardaran los tiempos de cada turno, así que el texto no puede seguir al audio.</span>
+             <button class="pill sm" onclick="resync()">Sincronizar con el audio</button></div>`:'')
+        +(!url&&!sync?`<div class="nosync">Sin audio guardado: no hay nada que sincronizar.</div>`:'')
+        +`<div class="actions"><button class="pill ghost sm" onclick="copyTranscript()">⧉ Copiar transcripción</button></div>`
+        +turnRows(s);
+      if(url&&sync)bindPlayer();
+    }
+  }else if(tab==='media'){
+    const sh=(s.paths||{}).shot_urls||[],ph=(s.paths||{}).shots||[];
+    p.className='content info';
+    p.innerHTML=`<h4>Capturas (${sh.length})</h4>`+(sh.length
+      ?`<div class="shots">`+sh.map((u,i)=>`<a class="shot" title="Abrir en tamaño real"
+          onclick='openp(${jsarg(ph[i])})'><img src="${esc(u)}" loading="lazy"></a>`).join('')+`</div>`
+      :`<div class="hint">Todavía no hay capturas de esta sesión. Se toman con el botón de la
+          cámara del widget, mientras grabás.</div>`);
+  }else if(tab==='summary'){
+    if(s.stage)p.innerHTML=spin(s.stage);      // transcribiendo o resumiendo: el resumen ya viene
+    // rehacer: el resumen viejo se queda en pantalla hasta que llega el nuevo, y si
+    // falla, doSummary deja el error sin haber borrado nada
+    else if(s.summary){p.className='content md';p.innerHTML=
+      (s.sum_error?`<div class="warn">No se pudo rehacer: ${esc(s.sum_error)}</div>`:'')
+      +md(s.summary)
+      +`<div class="actions"><button class="pill ghost sm" onclick="doSummary()"
+        ${s.status!=='done'?'disabled':''}>↻ Rehacer resumen</button></div>`;}
+    else p.innerHTML=(s.sum_error?`<div class="warn">No se pudo resumir: ${esc(s.sum_error)}</div>`:'')
+      +`<div class="actions"><button class="pill" onclick="doSummary()"
+        ${s.status!=='done'?'disabled':''}>▶ Generar resumen</button></div>`;
+  }else if(tab==='notes'){
+    p.className='content notes';
+    p.innerHTML=`<div class="notebar">
+        <button class="pill ghost sm" onclick="newNote()">+ Nueva nota</button>
+        <span class="hint">Se guardan solas. Al resumir, la IA las mezcla con la transcripción.</span>
+      </div>
+      <textarea id="ta" placeholder="Escribe acá durante la reunión. Cada «+ Nueva nota» agrega una entrada con la hora.">${esc(s.notes)}</textarea>`;
+    let t;$('#ta').oninput=e=>{cur.notes=e.target.value;
+      clearTimeout(t);t=setTimeout(()=>pywebview.api.save_notes(s.id,e.target.value),600);};
+  }else if(tab==='info'){
+    const P=s.paths||{},sh=P.shots||[];
+    p.className='content info';
+    p.innerHTML=`
+      <h4>Transcripción</h4>
+      <div class="path" title="Mostrar en el Explorador" onclick='reveal(${jsarg(P.json)})'
+        >${esc(P.json)}</div>
+      <div class="hint">Ahí vive todo lo de esta sesión: el texto, el resumen, las notas y el chat.</div>
+      <h4>Audio de auditoría</h4>
+      ${P.audio?`<div class="path" title="Mostrar en el Explorador" onclick='reveal(${jsarg(P.audio)})'
+          >${esc(P.audio)}</div>
+        <div class="actions">
+          <button class="pill sm" onclick='openp(${jsarg(P.audio)})'>▶ Escuchar</button>
+          <button class="pill danger sm" onclick="delAudio()">Borrar audio</button>
+        </div>
+        <div class="hint">Se abre con tu reproductor de Windows: un WAV de una hora son ~110 MB y
+          ahí tenés avance y velocidad de verdad.</div>`
+      :`<div class="hint">Esta sesión no tiene audio guardado. Se conserva cuando «Guardar audio»
+          está activo en ⚙ (lo está por defecto) y lo podés borrar acá cuando ya no lo necesites.</div>`}
+      <h4>Capturas</h4>
+      <div class="hint">${sh.length?sh.length+' archivo(s) en la carpeta, se ven en <b>Media</b>.'
+        :'Ninguna todavía.'}</div>
+      ${sh.length?`<div class="path" title="Mostrar en el Explorador"
+          onclick='reveal(${jsarg(sh[0])})'>${esc(P.dir||'')}</div>`:''}`;
+  }else if(tab==='chat'){
+    p.innerHTML=(s.chat||[]).map(m=>`<div class="msg q">${esc(m.q)}</div><div class="msg a md">${md(m.a)}</div>`).join('')
+      ||'<div style="color:var(--muted-48)">Pregunta lo que quieras sobre esta sesión.</div>';
+    cb.className='chatbar';
+    cb.innerHTML=`<input id="cq" placeholder="Pregunta sobre esta sesión…">
+      <button class="pill" onclick="ask()">Enviar</button>`;
+    $('#cq').onkeydown=e=>{if(e.key==='Enter')ask();};
+    p.scrollTop=p.scrollHeight;
+  }
+}
+function newNote(){                       // entrada nueva con la hora, y el cursor al final
+  const ta=$('#ta'),hh=new Date().toTimeString().slice(0,5);
+  ta.value=(ta.value.trimEnd()?ta.value.trimEnd()+'\n\n':'')+'— '+hh+' —\n';
+  cur.notes=ta.value;pywebview.api.save_notes(cur.id,ta.value);
+  ta.focus();ta.selectionStart=ta.selectionEnd=ta.value.length;ta.scrollTop=ta.scrollHeight;
+}
+async function copyTranscript(){
+  const txt=turnsOf(cur).map(x=>(x.who?x.who+': ':'')+x.text).join('\n\n');
+  if(!txt.trim())return;
+  setStatus('Copiando…');
+  const r=await pywebview.api.copy_text(txt);
+  setStatus(r.ok?'Transcripción copiada ✓':(r.msg?'⚠ '+r.msg:'⚠ No se pudo copiar'));
+  setTimeout(()=>setStatus(''),2000);
+}
+async function doSummary(){
+  // el stage optimista mete la sesión en el poll, que después trae el progreso real por tramo
+  const m=findMeta(cur.id);cur.stage='Resumiendo…';if(m)m.stage=cur.stage;renderPane();
+  const r=await pywebview.api.summarize(cur.id);
+  cur.stage='';if(m)m.stage='';
+  if(r.ok){cur.summary=r.summary;cur.sum_error=null;}else cur.sum_error=r.msg;
+  renderPane();renderList();
+}
+async function ask(){
+  const q=$('#cq').value.trim();if(!q)return;$('#cq').value='';
+  cur.chat=cur.chat||[];cur.chat.push({q,a:'…'});renderPane();setStatus('Pensando…');
+  const r=await pywebview.api.ask(cur.id,q);setStatus('');cur.chat.pop();
+  cur.chat.push({q,a:r.ok?r.a:'⚠ '+r.msg});renderPane();
+}
+// Nada irreversible sin pasar por acá. El "sí" vive en una variable, no en el DOM: el modal no
+// puede quedar apuntando a una sesión que ya no es la seleccionada.
+let onYes=null;
+function askConfirm(title,text,fn,label){
+  $('#ctitle').textContent=title;$('#ctext').textContent=text;
+  // el rojo es para lo irreversible: si la acción no borra nada, el botón no puede parecer que sí
+  $('#cyes').textContent=label||'Eliminar';
+  $('#cyes').className='pill'+(label?'':' danger');
+  onYes=fn;$('#cmask').classList.add('show');}
+function closeConfirm(){$('#cmask').classList.remove('show');onYes=null;}
+function confirmYes(){const f=onYes;closeConfirm();if(f)f();}
+function del(){
+  askConfirm('¿Eliminar "'+(cur.name||'esta sesión')+'"?',
+    'Se borra la transcripción, el resumen, las notas y el audio. No se puede deshacer.',doDel);}
+async function doDel(){
+  setStatus('Eliminando…');await pywebview.api.delete_session(cur.id);
+  cur=null;await loadList();setStatus('');
+}
+function reveal(p){pywebview.api.open_path(p,true);}
+function openp(p){pywebview.api.open_path(p,false);}
+
+// --- reproductor sincronizado con la transcripción (estilo tl;dv) ---
+function seek(t){const a=$('#pl');if(!a)return;a.currentTime=t;a.play();}
+// El turno que suena: el último cuyo tiempo ya pasó. Búsqueda lineal a propósito: son ~1000
+// turnos 4 veces por segundo, nada, y se mantiene correcta cuando saltás la aguja hacia atrás.
+function activeTurn(rows,t){
+  for(let i=rows.length-1;i>=0;i--)if(parseFloat(rows[i].dataset.t)<=t)return rows[i];
+  return null;}
+function bindPlayer(){
+  const a=$('#pl'),p=$('#pane'),rows=[...document.querySelectorAll('#pane .turn[data-t]')];
+  if(!a||!rows.length)return;
+  // 'playing' atenúa por CSS lo que todavía no se dijo. Solo mientras suena: en pausa se lee
+  // la transcripción entera con el mismo contraste.
+  a.onplay=()=>p.classList.add('playing');
+  a.onpause=a.onended=()=>p.classList.remove('playing');
+  let on=null;
+  a.ontimeupdate=()=>{
+    const r=activeTurn(rows,a.currentTime);
+    if(r===on)return;
+    if(on)on.classList.remove('on');
+    on=r;
+    if(!r)return;
+    r.classList.add('on');
+    // 'nearest': solo mueve el scroll si la línea quedó fuera de la vista.
+    // ponytail: si estás leyendo otra parte con el audio andando, te devuelve acá. Si molesta,
+    // un botón "seguir" que apague esta línea alcanza.
+    r.scrollIntoView({block:'nearest'});
+  };
+}
+function delAudio(){
+  askConfirm('¿Borrar el audio de "'+(cur.name||'esta sesión')+'"?',
+    'Se borra solo el .wav. La transcripción, el resumen y las notas quedan.',async()=>{
+      const r=await pywebview.api.delete_audio(cur.id);
+      cur.paths=r.paths;renderPane();});}
+// Sincronizar una sesión vieja: se vuelve a transcribir el .wav guardado solo para sacarle los
+// tiempos. Ese .wav es la MEZCLA de los dos canales, así que si la sesión sí tenía hablantes
+// separados los pierde — y eso hay que decirlo antes, no después.
+function resync(){
+  const perdidos=turnsOf(cur).some(x=>x.who);
+  askConfirm('¿Sincronizar "'+(cur.name||'esta sesión')+'" con el audio?',
+    'Se vuelve a transcribir el audio guardado para obtener el minuto de cada turno. Tarda unos '
+    +'minutos y consume cuota de Groq.'+(perdidos?' OJO: el audio guardado es la mezcla de los '
+    +'dos canales, así que la separación de hablantes de esta sesión se pierde y queda texto '
+    +'corrido.':' Las notas, el resumen y el chat no se tocan.'),async()=>{
+      const m=findMeta(cur.id);cur.stage='Sincronizando…';if(m)m.stage=cur.stage;
+      renderPane();renderList();
+      const r=await pywebview.api.resync(cur.id);
+      cur=await pywebview.api.get_session(cur.id);
+      if(!r.ok)setStatus(r.msg||'');
+      renderDetail();renderList();
+    },'Sincronizar');
+}
+async function retry(){setStatus('Reintentando…');await pywebview.api.retry_transcription(cur.id);
+  cur=await pywebview.api.get_session(cur.id);renderDetail();}
+function rename(el){
+  const t=el.textContent.trim().replace(/\s+/g,' ').slice(0,80);  // espejo de clean_name()
+  el.textContent=t||cur.name;                    // mostrar exactamente lo que se guarda
+  if(!t||t===cur.name)return;
+  pywebview.api.rename_session(cur.id,t);cur.name=t;
+  const m=findMeta(cur.id);if(m)m.name=t;renderList();}
+
+async function toggleFav(id){
+  id=id||cur.id;
+  const r=await pywebview.api.toggle_fav(id);
+  const m=findMeta(id);if(m)m.fav=r.fav;
+  if(cur&&cur.id===id){cur.fav=r.fav;renderDetail();}
+  renderList();
+}
+
+// buscador y filtro de favoritos
+let sT;$('#q').oninput=e=>{clearTimeout(sT);sT=setTimeout(()=>{query=e.target.value.trim();cur=null;loadList();},250);};
+$('#favf').onclick=()=>{favOnly=!favOnly;$('#favf').className='favf'+(favOnly?' on':'');renderList();};
+
+window.refresh=async(sid)=>{await loadList(sid||undefined);};
+
+// settings
+const setDark=d=>document.documentElement.dataset.theme=d?'dark':'light';
+// qué significa cada tema lo decide dark_mode() en Python, para el widget y para acá
+const applyTheme=async()=>setDark(await pywebview.api.is_dark(theme));
+function drawSettings(){
+  $('#sw').className='sw'+(keepAudio?' on':'');
+  $('#sw2').className='sw'+(labelSp?' on':'');
+  document.querySelectorAll('#themes button').forEach(b=>b.className=b.dataset.t===theme?'on':'');
+}
+function openSettings(){
+  pywebview.api.get_settings().then(s=>{
+    keepAudio=s.keep_audio;labelSp=s.label_speakers;theme=s.theme||'auto';
+    saved={keepAudio,labelSp,theme};        // para Cancelar
+    $('#me').value=s.name||'';
+    $('#key').value='';$('#gkey').value='';$('#smsg').textContent='';
+    $('#gkey').placeholder=s.gemini_set?'•••••••• (guardada, se usa para resumir)':'AIza…';
+    $('#cmodel').value=s.chat_model||'';$('#cmodel').placeholder=s.chat_model_def||'';
+    $('#delg').style.display=s.gemini_set?'':'none';
+    drawSettings();applyTheme();});
+  $('#mask').classList.add('show');
+}
+function cancelSettings(){                  // deshace lo tocado, incluido el tema en vivo
+  ({keepAudio,labelSp,theme}=saved);applyTheme();$('#mask').classList.remove('show');
+}
+function setTheme(t){theme=t;applyTheme();drawSettings();}
+window.openSettings=openSettings;
+$('#gear').onclick=openSettings;
+// Traer de vuelta el widget: es el único sitio desde donde se graba, y su ✕ lo cierra del todo.
+async function showWidget(){
+  const r=await pywebview.api.open_widget();
+  setStatus(r.msg);setTimeout(()=>setStatus(''),2500);
+}
+$('#pill').onclick=showWidget;
+$('#sw').onclick=()=>{keepAudio=!keepAudio;drawSettings();};
+$('#sw2').onclick=()=>{labelSp=!labelSp;drawSettings();};
+$('#mask').onclick=e=>{if(e.target===$('#mask'))cancelSettings();};   // clic fuera = cancelar
+$('#cmask').onclick=e=>{if(e.target===$('#cmask'))closeConfirm();};  // clic fuera = no eliminar
+document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;   // Esc cierra lo de arriba
+  if($('#cmask').classList.contains('show'))closeConfirm();
+  else if($('#mask').classList.contains('show'))cancelSettings();});
+async function testKey(){$('#smsg').textContent='Probando…';$('#smsg').className='msg';
+  // prueba las dos: la de Gemini es la que va a resumir, así que un dedazo ahí tiene que verse acá
+  const r=await pywebview.api.test_key($('#key').value.trim(),$('#gkey').value.trim(),
+                                       $('#cmodel').value.trim());
+  $('#smsg').textContent=r.msg;$('#smsg').className='msg '+(r.ok?'ok':'err');}
+async function dropGemini(){
+  const r=await pywebview.api.save_settings(keepAudio,labelSp,'',theme,null,'-');
+  $('#gkey').value='';$('#gkey').placeholder='AIza…';$('#delg').style.display='none';
+  $('#smsg').textContent='Gemini quitado: se resume con Groq ✓';$('#smsg').className='msg ok';}
+async function saveSettings(){
+  const st=await pywebview.api.save_settings(keepAudio,labelSp,$('#key').value.trim(),theme,
+                                             $('#me').value.trim(),$('#gkey').value.trim(),
+                                             $('#cmodel').value.trim());
+  myName=st.name||'';saved={keepAudio,labelSp,theme};
+  if(cur)renderDetail();                    // cambió a quién marcar como "yo" y las menciones
+  $('#smsg').textContent='Guardado ✓';$('#smsg').className='msg ok';
+  setTimeout(()=>$('#mask').classList.remove('show'),500);
+}
+window.addEventListener('pywebviewready',boot);
+</script>
+</body></html>
