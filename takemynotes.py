@@ -1634,9 +1634,9 @@ def launch_window(action=""):
 
 # ---------- WIDGET nativo (Tkinter, transparente) ----------
 KEYCOLOR = "#0b0c0e"   # color-llave: se vuelve transparente
-LIGHT = {"pill": "#f5f5f7", "edge": "#d3d3d8", "ink": "#1d1d1f", "dim": "#7a7a7a",
+LIGHT = {"pill": "#f5f5f7", "edge": "#d2d2d7", "ink": "#1d1d1f", "dim": "#7a7a7a",
          "icon": "#333333", "warn": "#b46b00"}
-DARK = {"pill": "#2c2c2e", "edge": "#48484a", "ink": "#f5f5f7", "dim": "#a1a1a6",
+DARK = {"pill": "#000000", "edge": "#2e2e2e", "ink": "#f5f5f7", "dim": "#a1a1a6",
         "icon": "#e5e5ea", "warn": "#ff9f0a"}
 NOSIGNAL = 60             # s grabando sin voz en un canal desde el arranque => avisar en vivo
 HOTKEY = (0x0002 | 0x0004 | 0x4000, ord("R"))   # Ctrl+Shift+R (MOD_CONTROL|SHIFT|NOREPEAT)
@@ -1648,8 +1648,9 @@ TIPS = {"rec": "Grabar / detener (Ctrl+Shift+R)", "mic": "Cortar mi micrófono",
 
 def in_pill(x, y, w, h, r):
     """¿(x, y) cae dentro del pill redondeado? Lo usa selftest para verificar que ningún halo de
-    botón se salga por una esquina: el ✕ apretado se salía 2 px y se veía como un mordisco."""
-    x1, y1, x2, y2 = 2, 2, w - 2, h - 2
+    botón se salga por una esquina: el ✕ apretado se salía 2 px y se veía como un mordisco.
+    Es un notch: plano arriba (las esquinas de arriba quedan en y<0, fuera de la ventana)."""
+    x1, y1, x2, y2 = 0, -r, w, h - 1
     cx, cy = min(max(x, x1 + r), x2 - r), min(max(y, y1 + r), y2 - r)
     if cx != x and cy != y:                  # zona de esquina: distancia al centro del arco
         return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
@@ -1680,7 +1681,12 @@ class Widget:
     """Pill flotante. Distribución fija a propósito: los botones de sesión (micro, cámara, pausa)
     se dibujan SIEMPRE y solo se apagan cuando no se está grabando. Antes aparecían y
     desaparecían, y el pill quedaba con un hueco de 78 px que se veía disparejo."""
-    W, H, R = 400, 54, 24               # R: radio de la esquina, lo usa also_in_pill()
+    W, H, R = 400, 54, 20               # R: radio de las esquinas de abajo, lo usa in_pill()
+    EAR = 12                            # radio de la oreja cóncava a cada lado, fuera del cuerpo
+    TAB_W, TAB_H = 79, 10               # plegado: la pestañita (codenotch: #rest)
+    ANIM = 360                          # ms del plegado/desplegado
+    PEEK = 2500                         # ms que queda abierto solo cuando hay algo nuevo
+    FOLD_DELAY = 700                    # ms sin el mouse encima antes de plegarse
 
     NEEDS_REC = ("mic", "shot", "pause")    # inertes sin grabación en curso (ver _hit)
     # x de cada control. Un solo sitio: el dibujo y los tests salen de acá, y selftest verifica
@@ -1703,10 +1709,21 @@ class Widget:
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", KEYCOLOR)
         self.root.config(bg=KEYCOLOR)
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{self.W}x{self.H}+{sw - self.W - 28}+{sh - self.H - 80}")
-        self.c = tk.Canvas(self.root, width=self.W, height=self.H, bg=KEYCOLOR, highlightthickness=0)
+        # Notch pegado al borde superior. La ventana es SIEMPRE del tamaño abierto (más las
+        # orejas): plegado solo cambia lo dibujado, y el color-llave es click-through.
+        E, sw = self.EAR, self.root.winfo_screenwidth()
+        self.root.geometry(f"{self.W + 2 * E}x{self.H}+{(sw - self.W) // 2 - E}+0")
+        # El canvas muestra desde x=-EAR: los controles (GRIP…QUIT) siguen en las mismas x y las
+        # orejas se dibujan en x<0 y x>W. Por eso los eventos pasan por canvasx().
+        self.c = tk.Canvas(self.root, width=self.W + 2 * E, height=self.H, bg=KEYCOLOR,
+                           highlightthickness=0, scrollregion=(-E, 0, self.W + E, self.H))
+        self.c.xview_moveto(0)
         self.c.pack()
+        self._open = 0.0              # 0 plegado … 1 abierto (fracción, para la animación)
+        self._anim = None             # job de after() de la animación en curso
+        self._fold_job = None         # job de after() que va a plegar
+        self._pinned = False          # clic derecho: no se pliega («Keep open» de codenotch)
+        self._news = None             # lo último que hubo que mostrar: si cambia, _peek()
         self.recording = False
         self.rec = self.rec_id = None
         self.t0 = 0
@@ -1735,12 +1752,15 @@ class Widget:
         for t in ("drag", "pill"):
             self.c.tag_bind(t, "<ButtonPress-1>", self._press)
             self.c.tag_bind(t, "<B1-Motion>", self._move)
+            self.c.tag_bind(t, "<Button-3>", self._pin)
         self.root.bind("<ButtonRelease-1>", self._drop)
         self.c.bind("<Motion>", self._motion)
+        self.c.bind("<Enter>", lambda e: self._unfold())
         self.c.bind("<Leave>", lambda e: self._set_tip(None))
         threading.Thread(target=self._auto_retry, daemon=True).start()
         threading.Thread(target=self._hotkey, daemon=True).start()
-        self._loop()
+        self._loop()                  # el primer tick hace _peek(): se ve que arrancó
+        self._hover()
 
     # --- atajo global ---
     def _hotkey(self):
@@ -1760,8 +1780,9 @@ class Widget:
     # --- tooltips ---
     def _tip_at(self, x, y):
         """Qué control hay bajo (x, y). Por coordenadas y no por <Enter> en los items: grabando,
-        _draw() los borra y recrea cada 500 ms y el tooltip parpadearía."""
-        if self._dragging:
+        _draw() los borra y recrea cada 500 ms y el tooltip parpadearía. Plegado o animando no
+        hay controles."""
+        if self._dragging or self._open < 1:
             return None
         if abs(x - self.REC) <= self.RECR:
             return "rec"
@@ -1774,7 +1795,7 @@ class Widget:
         return None
 
     def _motion(self, e):
-        self._set_tip(self._tip_at(e.x, e.y))
+        self._set_tip(self._tip_at(self.c.canvasx(e.x), e.y))
 
     def _set_tip(self, tag):
         """Cambia el tooltip pendiente o visible. Aparece a los 600 ms de quedarse encima."""
@@ -1798,8 +1819,9 @@ class Widget:
         tk.Label(w, text=TIPS[tag], bg=p["ink"], fg=p["pill"], font=("Segoe UI", 8),
                  padx=6, pady=2).pack()
         w.update_idletasks()
-        x = self.root.winfo_x() + getattr(self, tag.upper()) - w.winfo_reqwidth() // 2
-        w.geometry(f"+{max(0, x)}+{max(0, self.root.winfo_y() - w.winfo_reqheight() - 4)}")
+        # debajo del notch: arriba está el borde de la pantalla
+        x = self.root.winfo_x() + self.EAR + getattr(self, tag.upper()) - w.winfo_reqwidth() // 2
+        w.geometry(f"+{max(0, x)}+{self.root.winfo_y() + self.H + 4}")
 
     # --- botones ---
     def _btn(self, tag, fn):
@@ -1853,7 +1875,7 @@ class Widget:
         w = self.notes_win = tk.Toplevel(self.root)
         w.title("Notas de la sesión")
         w.attributes("-topmost", True)
-        w.geometry(f"340x240+{max(0, self.root.winfo_x() - 60)}+{max(0, self.root.winfo_y() - 270)}")
+        w.geometry(f"340x240+{max(0, self.root.winfo_x() + self.EAR)}+{self.root.winfo_y() + self.H + 10}")
         w.config(bg=p["pill"])
         tk.Label(w, text="Se guardan en la sesión al detener la grabación.", bg=p["pill"],
                  fg=p["dim"], font=("Segoe UI", 8)).pack(pady=(8, 0))
@@ -1921,14 +1943,116 @@ class Widget:
     def _state(self):
         """Lo que se ve. Si dos valores iguales, no hace falta repintar (lo mira _loop)."""
         return (self.recording, self.label, self.idle, self._pal is DARK, self._pressed,
-                bool(self.pause_t0), self.jobs, self._muted(), self._levels(), self._no_signal())
+                bool(self.pause_t0), self.jobs, self._muted(), self._levels(), self._no_signal(),
+                round(self._open, 2), self._pinned)
+
+    # --- notch: plegar y desplegar ---
+    def _body(self, dot):
+        """Plano arriba (las esquinas de arriba se dibujan en y<0, fuera de la ventana) y
+        redondeado abajo. Plegado es la pestañita con el punto de estado; animando, un cuerpo
+        interpolado; abierto suma las orejas cóncavas donde toca el borde de la pantalla.
+        Devuelve True solo abierto del todo: ahí van los controles."""
+        c, p = self.c, self._pal
+        t = 1 - (1 - self._open) ** 3                   # ease-out
+        w = self.TAB_W + (self.W - self.TAB_W) * t
+        h = self.TAB_H + (self.H - self.TAB_H) * t
+        r = 6 + (self.R - 6) * t
+        x1 = (self.W - w) / 2
+        self._round(x1, -r, x1 + w, h - 1, r, fill=p["pill"], outline=p["edge"], tags="pill")
+        if self._open == 0:
+            if dot != "#9a9aa0":                        # parado: sin punto
+                c.create_oval(self.W / 2 - 2, 2, self.W / 2 + 3, 7, fill=dot, outline="",
+                              tags="pill")
+            return False
+        if self._open < 1:
+            return False
+        E = self.EAR
+        # Oreja: un cuadrado del color del pill tapa el borde lateral del cuerpo, y un cuarto
+        # de círculo color-llave le recorta la curva cóncava; el arco pinta el borde encima.
+        for x, cx, start in ((-E, -E, 0), (self.W, self.W + E, 90)):
+            c.create_rectangle(x, 0, x + E + 1, E, fill=p["pill"], outline="", tags="pill")
+            box = (cx - E, 0, cx + E, 2 * E)
+            c.create_arc(*box, start=start, extent=90, style="pieslice", fill=KEYCOLOR,
+                         outline="")
+            c.create_arc(*box, start=start, extent=90, style="arc", outline=p["edge"])
+        return True
+
+    def _busy(self):
+        """Hay algo que el usuario tiene que ver: no se pliega."""
+        return bool(self.idle == "warn" or self._no_signal() or self.label or self._pressed
+                    or self.pause_t0 or self.jobs
+                    or (self.notes_win and self.notes_win.winfo_viewable()))
+
+    def _unfold(self):
+        """Abre (si no está abierto) y cancela un plegado pendiente."""
+        self._cancel_fold()
+        if self._open < 1:
+            self._animate(1)
+
+    def _fold(self):
+        """Cierra, salvo que esté fijado, ocupado o en medio de un arrastre."""
+        self._fold_job = None
+        if self._pinned or self._busy() or self._dragging:
+            return
+        if self._open > 0:
+            self._animate(0)
+
+    def _peek(self):
+        """Algo nuevo que mostrar: abre y programa el plegado a los PEEK ms."""
+        self._unfold()
+        self._arm_fold(self.PEEK)
+
+    def _arm_fold(self, ms):
+        self._cancel_fold()
+        self._fold_job = self.root.after(ms, self._fold)
+
+    def _cancel_fold(self):
+        if self._fold_job:
+            self.root.after_cancel(self._fold_job)
+            self._fold_job = None
+
+    def _animate(self, target, instant=False):
+        """Pasos de 16 ms hasta target (0 o 1). instant=True salta al final (selftest).
+        Arrastrando no se repinta (ver _loop): espera a que suelten."""
+        if self._anim:
+            self.root.after_cancel(self._anim)
+            self._anim = None
+        if instant:
+            self._open = target
+        elif not self._dragging:
+            step = 16 / self.ANIM
+            self._open = min(self._open + step, 1) if target else max(self._open - step, 0)
+        if self._open != target:
+            self._anim = self.root.after(16, lambda: self._animate(target))
+        if not self._dragging:
+            self._draw()
+
+    def _hover(self):
+        """Sondea el puntero (GetCursorPos) en vez de fiarse de <Leave>: con color-llave el
+        mouse «sale» de la ventana en cada píxel transparente. Diez lecturas por segundo."""
+        x, y = self.root.winfo_pointerxy()
+        wx, wy = self.root.winfo_x(), self.root.winfo_y()
+        if self._open:
+            x1, x2, y2 = wx, wx + self.W + 2 * self.EAR, wy + self.H
+        else:                                           # la pestañita ± 24 px: «al acercarse»
+            x1 = wx + self.EAR + (self.W - self.TAB_W) // 2 - 24
+            x2, y2 = x1 + self.TAB_W + 48, wy + self.TAB_H + 24
+        if x1 <= x <= x2 and wy <= y <= y2:
+            self._unfold()
+        elif self._open and not self._fold_job:
+            self._arm_fold(self.FOLD_DELAY)
+        self.root.after(100, self._hover)
 
     def _draw(self):
         c, p = self.c, self._pal
         c.delete("all")
-        self._round(2, 2, self.W - 2, self.H - 2, 24, fill=p["pill"], outline=p["edge"], tags="pill")
         dot = (p["warn"] if self.idle == "warn" else
                "#ff3b30" if self.recording and not self.pause_t0 else "#9a9aa0")
+        if not self._body(dot):
+            self._shown = self._state()
+            return
+        if self._pinned and dot == "#9a9aa0":
+            dot = p["ink"]                              # fijado: que se note
         # Asa de arrastre: dos columnas de puntitos. Sin algo explícito, el único sitio para
         # agarrar el pill era el hueco entre los iconos, que grabando casi no existe.
         for gx in (self.GRIP, self.GRIP + 4):
@@ -2022,7 +2146,16 @@ class Widget:
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
 
     def _move(self, e):
-        self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
+        """Solo se desliza por el borde superior, sin salirse de la pantalla."""
+        sw = self.root.winfo_screenwidth()
+        x = min(max(e.x_root - self._dx, -self.EAR), sw - self.W - self.EAR)
+        self.root.geometry(f"+{x}+0")
+
+    def _pin(self, _e=None):
+        """Clic derecho: queda fijo abierto (o lo suelta)."""
+        self._pinned = not self._pinned
+        self._unfold()
+        self._draw()
 
     def _drop(self, _e=None):
         """El release se escucha en la ventana y no en un tag del canvas: mientras se arrastra
@@ -2192,6 +2325,13 @@ class Widget:
                 self._draw()              # el cronómetro corre
         elif self._shown != self._state():
             self._draw()                  # cambió el tema, o terminó de transcribir
+        # Algo nuevo que ver (arrancó/paró, mensaje, aviso, terminó de transcribir): se abre
+        # solo. Sin el reloj ni las barritas de nivel, que grabando cambian a cada tick.
+        news = (self.recording, self.label, self.idle, bool(self.pause_t0), self.jobs,
+                self._muted(), self._no_signal())
+        if news != self._news:
+            self._news = news
+            self._peek()
         self.root.after(500, self._loop)
 
     def run(self):
@@ -2881,6 +3021,7 @@ def selftest():
     assert Widget.SEP == (areas["PAUSE"][1] + areas["NOTE"][0]) // 2, \
         "el separador tiene que quedar centrado entre los dos grupos, no pegado a uno"
     assert in_pill(Widget.GRIP - 2, 21, W, H, R), "el asa de arrastre se sale por la izquierda"
+    assert Widget.TAB_W < Widget.W and Widget.EAR <= Widget.R
 
     assert not _stale({"status": "pending", "pid": os.getpid()})
     dead = {"status": "pending", "pid": 999999999}    # no es múltiplo de 4: PID imposible
@@ -3290,14 +3431,15 @@ def selftest():
     w = Widget(); w.root.withdraw()                # oculto: sin parpadeo en pantalla
     assert w._pal is LIGHT                         # el tema sale de settings.json (light arriba)
     w.label = "captura 1 ✓"                        # mensaje efímero de una captura
-    w._loop(); assert w._shown == (False, "captura 1 ✓", "", False, None, False, 0, False,
-                                   (False, False), "")
+    w._loop(); assert w._shown[:10] == (False, "captura 1 ✓", "", False, None, False, 0, False,
+                                        (False, False), "") and w._shown[11] is False
     w._clear("otro"); assert w.label == "captura 1 ✓", "no pisa un mensaje más nuevo"
     w._clear("captura 1 ✓")                        # y el suyo sí lo limpia
     w._loop(); assert w._shown[:8] == (False, "", "", False, None, False, 0, False), "repintar"
     w.jobs = 2                                     # grabar la próxima mientras estas transcriben
     w._loop(); assert w._shown[6] == 2
     w.jobs = 0
+    w._animate(1, instant=True)                    # los controles solo existen abierto
     hits = []                                      # el clic dispara la acción y marca hundido
     w._hit("rec", lambda: hits.append(1))
     assert hits == [1] and w._shown[4] == "rec"
@@ -3374,6 +3516,18 @@ def selftest():
     w._open_notes(); w.notes_win.withdraw()        # el bloc alimenta la sesión y queda vacío
     w.notes_box.insert("1.0", "ojo con el gasto")
     assert w._take_notes() == "ojo con el gasto" and w._take_notes() == ""
+    # notch: plegado no hay controles, solo la pestañita
+    w._animate(0, instant=True)
+    assert w.c.find_withtag("pill") and not w.c.find_withtag("rec")
+    assert w._tip_at(Widget.REC, 26) is None, "plegado no hay tooltips"
+    w._peek(); assert w._anim and w._fold_job      # algo nuevo que ver: abre y arma el plegado
+    w._animate(1, instant=True); w._cancel_fold()
+    w.idle = "warn"; w._fold(); assert w._open == 1 and not w._anim, "ocupado no se pliega"
+    w.idle = ""; w._fold(); assert w._anim, "limpio sí"
+    w._animate(0, instant=True); assert w._open == 0
+    w._animate(1, instant=True); w._pinned = True
+    w._fold(); assert w._open == 1 and not w._anim, "fijado nunca"
+    w._pinned = False
     # «Cerrar TakeMyNotes» manda WM_CLOSE: tiene que pasar por _quit, no destruir a lo bruto
     assert w.root.protocol("WM_DELETE_WINDOW"), "sin protocolo, WM_CLOSE cerraría grabando"
     w.root.destroy()
