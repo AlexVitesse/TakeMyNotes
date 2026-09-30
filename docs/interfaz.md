@@ -2,8 +2,13 @@
 
 ## Widget (`class Widget`, Tkinter)
 
-Un pill flotante de 400 × 54 px, siempre encima y arrastrable desde el asa de puntos. La
-distribución es fija: los botones de sesión se dibujan siempre y se apagan cuando no se graba
+Un notch estilo [codenotch](https://github.com/vinzdg/codenotch) pegado al borde superior, al
+centro, siempre encima. Descansa **plegado** (pestañita de 79 × 10 con un punto de estado: rojo
+grabando, ámbar aviso, nada parado) y se **despliega** (400 × 54, plano arriba, esquinas de abajo
+de 20 px y orejas cóncavas donde toca el borde) al acercar el mouse o cuando hay algo nuevo
+(`_peek`: se abre 2,5 s). No se pliega mientras `_busy()` (aviso, sin señal, mensaje, pausa,
+transcribiendo, bloc abierto). Clic derecho lo deja fijo abierto; el asa lo arrastra solo por el
+borde superior. Tooltips y bloc de notas salen **debajo**. La distribución es fija: los botones de sesión se dibujan siempre y se apagan cuando no se graba
 (el pill no cambia de forma). Las coordenadas de cada control están en la clase (`MIC`, `REC`,
 `LVL`…) y `selftest` comprueba que ningún halo se pise con otro ni se salga del pill.
 

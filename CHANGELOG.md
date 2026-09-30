@@ -3,6 +3,13 @@
 Formato: [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 El detalle y el *por qué* de cada decisión están en los mensajes de commit (`git log`).
 
+## [Unreleased]
+
+### Cambiado
+
+- El widget es un notch pegado al borde superior, estilo codenotch: plegado a una pestañita, se
+  abre al acercar el mouse o cuando hay algo nuevo. Negro puro en tema oscuro.
+
 ## [0.8.0] — 2026-09-30
 
 Sale de la revisión del 30/09 (`PLAN.md`): integridad de datos entre los dos procesos, memoria y

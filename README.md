@@ -179,7 +179,7 @@ actualizar o desinstalar, el instalador cierra la app con `--quit` antes de toca
 
 ## 🎮 Uso
 
-**Widget** (esquina inferior derecha, siempre encima, arrastrable):
+**Widget** (notch arriba al centro: se despliega al acercar el mouse, arrastrable por el borde superior, clic derecho lo deja fijo):
 
 | Botón | Qué hace |
 |-------|----------|
