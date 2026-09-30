@@ -10,6 +10,15 @@ El detalle y el *por qué* de cada decisión están en los mensajes de commit (`
 - El widget es un notch pegado al borde superior, estilo codenotch: plegado a una pestañita, se
   abre al acercar el mouse o cuando hay algo nuevo. Negro puro en tema oscuro.
 
+### Agregado
+
+- Configuración → «Posición del widget»: el notch puede ir arriba, abajo (sobre la barra de
+  tareas), a la izquierda o a la derecha. En los lados es vertical.
+
+### Corregido
+
+- Cerrar el widget con la ✕ tumbaba el proceso (`alloc: invalid block`, código 3).
+
 ## [0.8.0] — 2026-09-30
 
 Sale de la revisión del 30/09 (`PLAN.md`): integridad de datos entre los dos procesos, memoria y

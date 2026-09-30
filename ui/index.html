@@ -67,6 +67,15 @@
       <button data-t="dark" onclick="setTheme('dark')">Oscuro</button>
     </div>
   </div>
+  <div class="row toggle">
+    <div><label>Posición del widget</label><div class="hint">Borde de la pantalla donde queda el notch.</div></div>
+    <div id="edges" class="seg tight">
+      <button data-e="top" onclick="setEdge('top')">Arriba</button>
+      <button data-e="bottom" onclick="setEdge('bottom')">Abajo</button>
+      <button data-e="left" onclick="setEdge('left')">Izq.</button>
+      <button data-e="right" onclick="setEdge('right')">Der.</button>
+    </div>
+  </div>
   <div class="row">
     <label>Tu nombre</label>
     <input id="me" type="text" placeholder="Eric" maxlength="24">
@@ -128,7 +137,7 @@
 <script>
 const $=s=>document.querySelector(s);
 let sessions=[], cur=null, tab='summary', keepAudio=false, labelSp=true, query='';
-let theme='auto', saved={}, related=null, favOnly=false, myName='', asking=false, pendView=false;
+let theme='auto', edge='top', saved={}, related=null, favOnly=false, myName='', asking=false, pendView=false;
 // Orden de las pestañas: también el de Ctrl+1…7
 const TABS=[['summary','Resumen'],['minuta','Minuta'],['transcript','Transcripción'],
   ['media','Media'],['notes','Notas'],['chat','Chat'],['info','Info']];
@@ -776,12 +785,13 @@ function drawSettings(){
   $('#sw').setAttribute?.('aria-checked',String(keepAudio));
   $('#sw2').setAttribute?.('aria-checked',String(labelSp));
   document.querySelectorAll('#themes button').forEach(b=>b.className=b.dataset.t===theme?'on':'');
+  document.querySelectorAll('#edges button').forEach(b=>b.className=b.dataset.e===edge?'on':'');
 }
 function openSettings(){
   closeMenu();
   pywebview.api.get_settings().then(s=>{
-    keepAudio=s.keep_audio;labelSp=s.label_speakers;theme=s.theme||'auto';
-    saved={keepAudio,labelSp,theme};        // para Cancelar
+    keepAudio=s.keep_audio;labelSp=s.label_speakers;theme=s.theme||'auto';edge=s.edge||'top';
+    saved={keepAudio,labelSp,theme,edge};        // para Cancelar
     $('#me').value=s.name||'';
     $('#key').value='';$('#gkey').value='';$('#smsg').textContent='';
     $('#gkey').placeholder=s.gemini_set?'•••••••• (guardada, se usa para resumir)':'AIza…';
@@ -791,9 +801,10 @@ function openSettings(){
   $('#mask').classList.add('show');
 }
 function cancelSettings(){                  // deshace lo tocado, incluido el tema en vivo
-  ({keepAudio,labelSp,theme}=saved);applyTheme();$('#mask').classList.remove('show');
+  ({keepAudio,labelSp,theme,edge}=saved);applyTheme();$('#mask').classList.remove('show');
 }
 function setTheme(t){theme=t;applyTheme();drawSettings();}
+function setEdge(e){edge=e;drawSettings();}   // el widget lo toma al guardar (relee settings.json)
 window.openSettings=openSettings;
 $('#gear').onclick=openSettings;
 // Traer de vuelta el widget: es el único sitio desde donde se graba, y su ✕ lo cierra del todo.
@@ -832,8 +843,8 @@ async function dropGemini(){
 async function saveSettings(){
   const st=await pywebview.api.save_settings(keepAudio,labelSp,$('#key').value.trim(),theme,
                                              $('#me').value.trim(),$('#gkey').value.trim(),
-                                             $('#cmodel').value.trim());
-  myName=st.name||'';saved={keepAudio,labelSp,theme};
+                                             $('#cmodel').value.trim(),edge);
+  myName=st.name||'';saved={keepAudio,labelSp,theme,edge};
   if(cur)renderDetail();                    // cambió a quién marcar como "yo" y las menciones
   $('#smsg').textContent='Guardado ✓';$('#smsg').className='msg ok';
   setTimeout(()=>$('#mask').classList.remove('show'),500);

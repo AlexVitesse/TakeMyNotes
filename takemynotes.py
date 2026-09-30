@@ -328,7 +328,7 @@ KEYS = {"key": "GROQ_API_KEY", "gemini_key": "GEMINI_API_KEY"}
 def load_settings():
     # keep_audio arranca en True: el audio es la única forma de auditar si la separación de
     # hablantes acertó, y se borra por sesión desde la pestaña Info de la ventana.
-    d = {"keep_audio": True, "label_speakers": True, "theme": "auto", "key": "",
+    d = {"keep_audio": True, "label_speakers": True, "theme": "auto", "edge": "top", "key": "",
          "gemini_key": "", "chat_model": "", "name": ""}
     raw = {}
     if os.path.exists(SETTINGS_PATH):
@@ -1646,6 +1646,17 @@ TIPS = {"rec": "Grabar / detener (Ctrl+Shift+R)", "mic": "Cortar mi micrófono",
         "lvl": "Nivel: micrófono · audio de la PC"}
 
 
+EDGES = ("top", "bottom", "left", "right")   # dónde va el notch (settings.json: "edge")
+
+
+def work_area():
+    """(izq, arriba, der, abajo) del escritorio sin la barra de tareas: abajo, el notch se
+    apoya encima de ella y no la tapa."""
+    r = wintypes.RECT()
+    ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0)   # SPI_GETWORKAREA
+    return r.left, r.top, r.right, r.bottom
+
+
 def in_pill(x, y, w, h, r):
     """¿(x, y) cae dentro del pill redondeado? Lo usa selftest para verificar que ningún halo de
     botón se salga por una esquina: el ✕ apretado se salía 2 px y se veía como un mordisco.
@@ -1698,6 +1709,9 @@ class Widget:
     NOTE, GEAR, EXPAND = 254, 280, 306  # controles de la app
     REC, QUIT = 340, 376
     HALO, RECR = 13, 15                 # radios: halo de un botón chico, y el círculo de grabar
+    # En los lados el notch es vertical (54 de ancho): los controles van en columna en las
+    # mismas posiciones, pero el reloj, las barritas y el estado se apilan en vez de ir en fila.
+    VCLOCK, VLVL, VSUB = 52, 66, 78
 
     def __init__(self):
         import tkinter as tk
@@ -1709,16 +1723,11 @@ class Widget:
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", KEYCOLOR)
         self.root.config(bg=KEYCOLOR)
-        # Notch pegado al borde superior. La ventana es SIEMPRE del tamaño abierto (más las
-        # orejas): plegado solo cambia lo dibujado, y el color-llave es click-through.
-        E, sw = self.EAR, self.root.winfo_screenwidth()
-        self.root.geometry(f"{self.W + 2 * E}x{self.H}+{(sw - self.W) // 2 - E}+0")
-        # El canvas muestra desde x=-EAR: los controles (GRIP…QUIT) siguen en las mismas x y las
-        # orejas se dibujan en x<0 y x>W. Por eso los eventos pasan por canvasx().
-        self.c = tk.Canvas(self.root, width=self.W + 2 * E, height=self.H, bg=KEYCOLOR,
-                           highlightthickness=0, scrollregion=(-E, 0, self.W + E, self.H))
-        self.c.xview_moveto(0)
+        # La ventana es SIEMPRE del tamaño abierto (más las orejas): plegado solo cambia lo
+        # dibujado, y el color-llave es click-through. Tamaño y lugar los pone _place().
+        self.c = tk.Canvas(self.root, bg=KEYCOLOR, highlightthickness=0)
         self.c.pack()
+        self.edge = None              # borde de la pantalla: lo lee _read_theme de settings.json
         self._open = 0.0              # 0 plegado … 1 abierto (fracción, para la animación)
         self._anim = None             # job de after() de la animación en curso
         self._fold_job = None         # job de after() que va a plegar
@@ -1778,24 +1787,25 @@ class Widget:
                 self._hot = True
 
     # --- tooltips ---
-    def _tip_at(self, x, y):
-        """Qué control hay bajo (x, y). Por coordenadas y no por <Enter> en los items: grabando,
-        _draw() los borra y recrea cada 500 ms y el tooltip parpadearía. Plegado o animando no
-        hay controles."""
+    def _tip_at(self, a, d):
+        """Qué control hay en (a, d) —a lo largo del notch, distancia al borde; ver _at—. Por
+        coordenadas y no por <Enter> en los items: grabando, _draw() los borra y recrea cada
+        500 ms y el tooltip parpadearía. Plegado o animando no hay controles."""
         if self._dragging or self._open < 1:
             return None
-        if abs(x - self.REC) <= self.RECR:
+        if abs(a - self.REC) <= self.RECR:
             return "rec"
-        if 14 <= y <= 40:
+        if 14 <= d <= 40:
             for tag in ("mic", "shot", "pause", "note", "gear", "expand", "quit"):
-                if abs(x - getattr(self, tag.upper())) <= self.HALO:
+                if abs(a - getattr(self, tag.upper())) <= self.HALO:
                     return tag
-        if self.recording and self.LVL - 3 <= x <= self.LVL + 8:
+        lvl = self._ax("lvl")
+        if self.recording and lvl - 6 <= a <= lvl + 6:
             return "lvl"
         return None
 
     def _motion(self, e):
-        self._set_tip(self._tip_at(self.c.canvasx(e.x), e.y))
+        self._set_tip(self._tip_at(*self._from(e.x, e.y)))
 
     def _set_tip(self, tag):
         """Cambia el tooltip pendiente o visible. Aparece a los 600 ms de quedarse encima."""
@@ -1819,9 +1829,8 @@ class Widget:
         tk.Label(w, text=TIPS[tag], bg=p["ink"], fg=p["pill"], font=("Segoe UI", 8),
                  padx=6, pady=2).pack()
         w.update_idletasks()
-        # debajo del notch: arriba está el borde de la pantalla
-        x = self.root.winfo_x() + self.EAR + getattr(self, tag.upper()) - w.winfo_reqwidth() // 2
-        w.geometry(f"+{max(0, x)}+{self.root.winfo_y() + self.H + 4}")
+        x, y = self._beside(self._ax(tag), w.winfo_reqwidth(), w.winfo_reqheight(), 4)
+        w.geometry(f"+{x}+{y}")
 
     # --- botones ---
     def _btn(self, tag, fn):
@@ -1861,7 +1870,65 @@ class Widget:
         if mt == self._st_mtime:
             return
         self._st_mtime = mt
-        self._pal = DARK if dark_mode(load_settings().get("theme", "auto")) else LIGHT
+        st = load_settings()
+        self._pal = DARK if dark_mode(st.get("theme", "auto")) else LIGHT
+        edge = st.get("edge") if st.get("edge") in EDGES else "top"
+        if edge != self.edge:
+            self.edge = edge
+            self._place()
+
+    # --- geometría: en qué borde está el notch ---
+    def _vertical(self):
+        return self.edge in ("left", "right")
+
+    def _size(self):
+        """Ventana (ancho, alto): el notch abierto más una oreja a cada lado."""
+        n = self.W + 2 * self.EAR
+        return (self.H, n) if self._vertical() else (n, self.H)
+
+    def _place(self):
+        """Al centro del borde elegido, dentro del área de trabajo (sin la barra de tareas)."""
+        (w, h), (l, t, r, b), E = self._size(), work_area(), self.EAR
+        x = {"left": l, "right": r - w}.get(self.edge, (l + r - self.W) // 2 - E)
+        y = {"top": t, "bottom": b - h}.get(self.edge, (t + b - self.W) // 2 - E)
+        self.c.config(width=w, height=h)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _at(self, a, d, shape=True):
+        """(a, d) del notch → (x, y) del canvas. `a` corre a lo largo del borde (0…W: son las x
+        de los controles, GRIP…QUIT) y `d` se aleja de él (0…H). Las orejas caen en a<0 y a>W,
+        por eso el +EAR. shape=True refleja d abajo y a la derecha, para la forma; los
+        controles no se reflejan (el reloj queda arriba del estado en los cuatro bordes)."""
+        a += self.EAR
+        if shape and self.edge in ("bottom", "right"):
+            d = self.H - d
+        return (d, a) if self._vertical() else (a, d)
+
+    def _pt(self, a, d):
+        return self._at(a, d, shape=False)
+
+    def _from(self, x, y):
+        """Inversa de _pt: de un evento del canvas a (a, d)."""
+        a, d = (y, x) if self._vertical() else (x, y)
+        return a - self.EAR, d
+
+    def _ax(self, tag):
+        """`a` del centro de un control (las barritas cambian de lugar en vertical)."""
+        if tag == "lvl":
+            return self.VLVL if self._vertical() else self.LVL + 3
+        return getattr(self, tag.upper())
+
+    def _beside(self, a, w, h, gap):
+        """Pantalla (x, y) para una ventana w×h pegada al notch del lado de adentro (hacia el
+        centro de la pantalla), centrada en el punto `a` del notch."""
+        wx, wy, E = self.root.winfo_x(), self.root.winfo_y(), self.EAR
+        if self._vertical():
+            x = wx + self.H + gap if self.edge == "left" else wx - w - gap
+            y = wy + E + a - h // 2
+        else:
+            x = wx + E + a - w // 2
+            y = wy + self.H + gap if self.edge == "top" else wy - h - gap
+        return max(0, x), max(0, y)
 
     # --- notas escritas ---
     def _open_notes(self):
@@ -1875,7 +1942,9 @@ class Widget:
         w = self.notes_win = tk.Toplevel(self.root)
         w.title("Notas de la sesión")
         w.attributes("-topmost", True)
-        w.geometry(f"340x240+{max(0, self.root.winfo_x() + self.EAR)}+{self.root.winfo_y() + self.H + 10}")
+        # 280 de alto con la barra de título: abajo no se mete debajo del notch
+        x, y = self._beside(140 if self._vertical() else 170, 340, 280, 10)
+        w.geometry(f"340x240+{x}+{y}")
         w.config(bg=p["pill"])
         tk.Label(w, text="Se guardan en la sesión al detener la grabación.", bg=p["pill"],
                  fg=p["dim"], font=("Segoe UI", 8)).pack(pady=(8, 0))
@@ -1947,24 +2016,30 @@ class Widget:
         """Lo que se ve. Si dos valores iguales, no hace falta repintar (lo mira _loop)."""
         return (self.recording, self.label, self.idle, self._pal is DARK, self._pressed,
                 bool(self.pause_t0), self.jobs, self._muted(), self._levels(), self._no_signal(),
-                round(self._open, 2), self._pinned)
+                round(self._open, 2), self._pinned, self.edge)
 
     # --- notch: plegar y desplegar ---
     def _body(self, dot):
-        """Plano arriba (las esquinas de arriba se dibujan en y<0, fuera de la ventana) y
-        redondeado abajo. Plegado es la pestañita con el punto de estado; animando, un cuerpo
-        interpolado; abierto suma las orejas cóncavas donde toca el borde de la pantalla.
-        Devuelve True solo abierto del todo: ahí van los controles."""
-        c, p = self.c, self._pal
+        """Plano del lado del borde (esas esquinas caen fuera de la ventana) y redondeado del
+        otro. Plegado es la pestañita con el punto de estado; animando, un cuerpo interpolado;
+        abierto suma las orejas cóncavas donde toca el borde de la pantalla. Se dibuja en
+        (a, d) y _at lo lleva al borde que toque. Devuelve True solo abierto del todo."""
+        c, p, at = self.c, self._pal, self._at
+
+        def box(a1, d1, a2, d2):
+            (x1, y1), (x2, y2) = at(a1, d1), at(a2, d2)
+            return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+
         t = 1 - (1 - self._open) ** 3                   # ease-out
         w = self.TAB_W + (self.W - self.TAB_W) * t
         h = self.TAB_H + (self.H - self.TAB_H) * t
         r = 6 + (self.R - 6) * t
-        x1 = (self.W - w) / 2
-        self._round(x1, -r, x1 + w, h - 1, r, fill=p["pill"], outline=p["edge"], tags="pill")
+        a1 = (self.W - w) / 2
+        self._round(*box(a1, -r, a1 + w, h - 1), r, fill=p["pill"], outline=p["edge"],
+                    tags="pill")
         if self._open == 0:
             if dot != "#9a9aa0":                        # parado: sin punto
-                c.create_oval(self.W / 2 - 2, 2, self.W / 2 + 3, 7, fill=dot, outline="",
+                c.create_oval(*box(self.W / 2 - 2, 2, self.W / 2 + 3, 7), fill=dot, outline="",
                               tags="pill")
             return False
         if self._open < 1:
@@ -1972,12 +2047,15 @@ class Widget:
         E = self.EAR
         # Oreja: un cuadrado del color del pill tapa el borde lateral del cuerpo, y un cuarto
         # de círculo color-llave le recorta la curva cóncava; el arco pinta el borde encima.
-        for x, cx, start in ((-E, -E, 0), (self.W, self.W + E, 90)):
-            c.create_rectangle(x, 0, x + E + 1, E, fill=p["pill"], outline="", tags="pill")
-            box = (cx - E, 0, cx + E, 2 * E)
-            c.create_arc(*box, start=start, extent=90, style="pieslice", fill=KEYCOLOR,
-                         outline="")
-            c.create_arc(*box, start=start, extent=90, style="arc", outline=p["edge"])
+        for a, ca, side in ((-E, -E, 1), (self.W, self.W + E, -1)):
+            c.create_rectangle(*box(a, 0, a + E + 1, E), fill=p["pill"], outline="", tags="pill")
+            (cx, cy), (bx, by), (ex, ey) = at(ca, E), at(ca + side, E), at(ca, E - 1)
+            # el cuarto que mira hacia el cuerpo y hacia el borde (ángulos de Tk: y para arriba)
+            q = {(1, -1): 0, (-1, -1): 90, (-1, 1): 180, (1, 1): 270}[
+                (bx - cx + ex - cx, by - cy + ey - cy)]
+            oval = (cx - E, cy - E, cx + E, cy + E)
+            c.create_arc(*oval, start=q, extent=90, style="pieslice", fill=KEYCOLOR, outline="")
+            c.create_arc(*oval, start=q, extent=90, style="arc", outline=p["edge"])
         return True
 
     def _busy(self):
@@ -2036,11 +2114,13 @@ class Widget:
         x, y = self.root.winfo_pointerxy()
         wx, wy = self.root.winfo_x(), self.root.winfo_y()
         if self._open:
-            x1, x2, y2 = wx, wx + self.W + 2 * self.EAR, wy + self.H
+            x1, y1, (x2, y2) = 0, 0, self._size()
         else:                                           # la pestañita ± 24 px: «al acercarse»
-            x1 = wx + self.EAR + (self.W - self.TAB_W) // 2 - 24
-            x2, y2 = x1 + self.TAB_W + 48, wy + self.TAB_H + 24
-        if x1 <= x <= x2 and wy <= y <= y2:
+            (ax, ay), (bx, by) = (self._at((self.W - self.TAB_W) / 2, 0),
+                                  self._at((self.W + self.TAB_W) / 2, self.TAB_H))
+            x1, y1 = min(ax, bx) - 24, min(ay, by) - 24
+            x2, y2 = max(ax, bx) + 24, max(ay, by) + 24
+        if wx + x1 <= x <= wx + x2 and wy + y1 <= y <= wy + y2:
             self._unfold()
         elif self._open and not self._fold_job:
             self._arm_fold(self.FOLD_DELAY)
@@ -2056,37 +2136,52 @@ class Widget:
             return
         if self._pinned and dot == "#9a9aa0":
             dot = p["ink"]                              # fijado: que se note
+        V, P = self._vertical(), self._pt
+
+        def base(a):
+            """(bx, by) tal que el icono del control `a` va en (bx + dx, by + y): en fila y es
+            la de siempre (14…40); en columna el icono se corre para centrarse en su lugar."""
+            x, y = P(a, 27)
+            return x, y - 27
+
         # Asa de arrastre: dos columnas de puntitos. Sin algo explícito, el único sitio para
         # agarrar el pill era el hueco entre los iconos, que grabando casi no existe.
-        for gx in (self.GRIP, self.GRIP + 4):
-            for gy in (21, 27, 33):
-                c.create_oval(gx - 1, gy - 1, gx + 1, gy + 1, fill=p["dim"], outline="",
-                              tags="drag")
+        for ga in (self.GRIP, self.GRIP + 4):
+            for gd in (21, 27, 33):
+                x, y = P(ga, gd)
+                c.create_oval(x - 1, y - 1, x + 1, y + 1, fill=p["dim"], outline="", tags="drag")
         # El estado va en una segunda línea debajo del reloj (al lado le quedaban 47 px y
         # "transcribiendo 2" no entraba). Cuando NO hay estado —lo normal— el reloj se centra
         # con los botones en vez de quedarse flotando arriba con un hueco vacío abajo.
+        # En vertical va todo apilado y centrado: reloj, barritas y el estado en letra chica.
         mudo = self._no_signal()
         sub = ("¿seguir grabando?" if self.idle == "warn" else
                "en pausa" if self.pause_t0 else
                self.label or mudo or (f"transcribiendo {self.jobs}" if self.jobs else ""))
-        cy = 20 if sub else 27
-        c.create_oval(self.DOT - 4, cy - 4, self.DOT + 4, cy + 4, fill=dot, outline="",
-                      tags="drag")
-        c.create_text(self.CLOCK, cy, anchor="w", text=self._fmt(),
-                      font=("Segoe UI", 12, "bold"), fill=p["ink"], tags="drag")
+        cy = 27 if V or not sub else 20
+        x, y = P(self.DOT, cy)
+        c.create_oval(x - 4, y - 4, x + 4, y + 4, fill=dot, outline="", tags="drag")
+        if V:
+            c.create_text(*P(self.VCLOCK, 27), text=self._fmt(), font=("Segoe UI", 9, "bold"),
+                          fill=p["ink"], tags="drag")
+        else:
+            c.create_text(*P(self.CLOCK, cy), anchor="w", text=self._fmt(),
+                          font=("Segoe UI", 12, "bold"), fill=p["ink"], tags="drag")
         if self.recording:            # nivel en vivo: micro y PC, verdes cuando entra voz
             for dx, on in zip((0, 5), self._levels()):
-                c.create_rectangle(self.LVL + dx, cy - 6, self.LVL + dx + 3, cy + 6,
+                x, y = P(self.VLVL, 24 + dx) if V else P(self.LVL + dx, cy)
+                c.create_rectangle(x, y - 6, x + 3, y + 6,
                                    fill="#34c759" if on else p["edge"], outline="", tags="drag")
         if sub:                       # 46..149 de ancho: el halo del micro arranca en 149
             warn = self.idle == "warn"
-            c.create_text(self.CLOCK, 38, anchor="w", text=sub,
-                          font=("Segoe UI", 9 if warn else 8, "bold" if warn else "normal"),
+            font = ("Segoe UI", 7 if V else 9 if warn else 8, "bold" if warn else "normal")
+            kw = dict(anchor="n", width=50, justify="center") if V else dict(anchor="w")
+            c.create_text(*(P(self.VSUB, 27) if V else P(self.CLOCK, 38)), text=sub, font=font,
                           fill=p["warn"] if warn or sub == mudo else p["dim"],
-                          tags="keep" if warn else "drag")
+                          tags="keep" if warn else "drag", **kw)
         press = 1.35 if p is DARK else 0.75          # apretado: aclarar en oscuro, oscurecer en claro
 
-        def halo(x, tag, col=None):
+        def halo(a, tag, col=None):
             """Fondo hundido del botón (se ve que el clic entró) y el color del icono resuelto.
             Un tag de NEEDS_REC sin grabación en curso sale apagado: el boton se sigue viendo
             —el pill no cambia de forma— pero se lee que ahora no hace nada.
@@ -2098,50 +2193,56 @@ class Widget:
             if self._pressed != tag:
                 return col, p["pill"]
             bg = shade(p["pill"], press)
-            c.create_oval(x - self.HALO, 14, x + self.HALO, 40, fill=bg, outline="", tags=tag)
+            x, y = base(a)
+            c.create_oval(x - self.HALO, y + 14, x + self.HALO, y + 40, fill=bg, outline="",
+                          tags=tag)
             return shade(col, press), bg
 
         # Micro / cámara / pausa: dibujados y no glyph, que no todas las Segoe UI los traen.
         # Se dibujan SIEMPRE (apagados si no se graba): antes aparecían y desaparecían y el
         # pill quedaba con un hueco de 78 px que se veía disparejo.
         mc = "#ff3b30" if self._muted() else halo(self.MIC, "mic")[0]
-        c.create_oval(self.MIC - 4, 16, self.MIC + 4, 28, fill=mc, outline="", tags="mic")
-        c.create_line(self.MIC, 28, self.MIC, 34, fill=mc, width=2, tags="mic")
-        c.create_line(self.MIC - 5, 34, self.MIC + 5, 34, fill=mc, width=2, tags="mic")
+        x, y = base(self.MIC)
+        c.create_oval(x - 4, y + 16, x + 4, y + 28, fill=mc, outline="", tags="mic")
+        c.create_line(x, y + 28, x, y + 34, fill=mc, width=2, tags="mic")
+        c.create_line(x - 5, y + 34, x + 5, y + 34, fill=mc, width=2, tags="mic")
         if self._muted():
-            c.create_line(self.MIC - 9, 37, self.MIC + 9, 15, fill=mc, width=2, tags="mic")
+            c.create_line(x - 9, y + 37, x + 9, y + 15, fill=mc, width=2, tags="mic")
         sc, bg = halo(self.SHOT, "shot")
-        c.create_rectangle(self.SHOT - 8, 22, self.SHOT + 8, 34, fill=sc, outline="", tags="shot")
-        c.create_rectangle(self.SHOT - 4, 19, self.SHOT + 4, 22, fill=sc, outline="", tags="shot")
-        c.create_oval(self.SHOT - 3, 25, self.SHOT + 3, 31, fill=bg, outline="", tags="shot")
+        x, y = base(self.SHOT)
+        c.create_rectangle(x - 8, y + 22, x + 8, y + 34, fill=sc, outline="", tags="shot")
+        c.create_rectangle(x - 4, y + 19, x + 4, y + 22, fill=sc, outline="", tags="shot")
+        c.create_oval(x - 3, y + 25, x + 3, y + 31, fill=bg, outline="", tags="shot")
         pc, _ = halo(self.PAUSE, "pause")
+        x, y = base(self.PAUSE)
         if self.pause_t0:
-            c.create_polygon(self.PAUSE - 4, 20, self.PAUSE - 4, 34, self.PAUSE + 8, 27,
+            c.create_polygon(x - 4, y + 20, x - 4, y + 34, x + 8, y + 27,
                              fill=pc, outline="", tags="pause")
         else:
             for dx in (-5, 2):
-                c.create_rectangle(self.PAUSE + dx, 20, self.PAUSE + dx + 3, 34, fill=pc,
+                c.create_rectangle(x + dx, y + 20, x + dx + 3, y + 34, fill=pc,
                                    outline="", tags="pause")
         # separador: a la izquierda los controles de la sesión, a la derecha los de la app.
         # Sin él son seis iconos seguidos y no se lee que son dos grupos distintos.
-        c.create_line(self.SEP, 19, self.SEP, 35, fill=p["edge"], tags="drag")
-        for x, glyph, size, tag, col in ((self.NOTE, "✎", 15, "note", p["icon"]),
+        c.create_line(*P(self.SEP, 19), *P(self.SEP, 35), fill=p["edge"], tags="drag")
+        for a, glyph, size, tag, col in ((self.NOTE, "✎", 15, "note", p["icon"]),
                                          (self.GEAR, "⚙", 13, "gear", p["icon"]),
                                          (self.EXPAND, "⤡", 12, "expand", p["icon"]),
                                          (self.QUIT, "✕", 11, "quit", p["dim"])):
-            g, _ = halo(x, tag, col)      # el ✕ es p["dim"], no p["icon"]
-            c.create_text(x, 27 if tag != "quit" else 26, text=glyph, font=("Segoe UI", size),
-                          fill=g, tags=tag)
+            g, _ = halo(a, tag, col)      # el ✕ es p["dim"], no p["icon"]
+            x, y = base(a)
+            c.create_text(x, y + (27 if tag != "quit" else 26), text=glyph,
+                          font=("Segoe UI", size), fill=g, tags=tag)
         rc = "#ff3b30" if self.recording else "#0066cc"
         if self._pressed == "rec":
             rc = shade(rc, 0.78)
         r = self.RECR - 2 if self._pressed == "rec" else self.RECR   # y se encoge un poco
-        c.create_oval(self.REC - r, 26 - r, self.REC + r, 26 + r, fill=rc, outline="", tags="rec")
+        x, y = base(self.REC)
+        c.create_oval(x - r, y + 26 - r, x + r, y + 26 + r, fill=rc, outline="", tags="rec")
         if self.recording:
-            c.create_rectangle(self.REC - 5, 21, self.REC + 5, 31, fill="#fff", outline="",
-                               tags="rec")
+            c.create_rectangle(x - 5, y + 21, x + 5, y + 31, fill="#fff", outline="", tags="rec")
         else:
-            c.create_oval(self.REC - 5, 21, self.REC + 5, 31, fill="#fff", outline="", tags="rec")
+            c.create_oval(x - 5, y + 21, x + 5, y + 31, fill="#fff", outline="", tags="rec")
         self._shown = self._state()
 
     def _press(self, e):
@@ -2149,10 +2250,13 @@ class Widget:
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
 
     def _move(self, e):
-        """Solo se desliza por el borde superior, sin salirse de la pantalla."""
-        sw = self.root.winfo_screenwidth()
-        x = min(max(e.x_root - self._dx, -self.EAR), sw - self.W - self.EAR)
-        self.root.geometry(f"+{x}+0")
+        """Solo se desliza a lo largo de su borde, sin salirse del área de trabajo."""
+        (l, t, r, b), E = work_area(), self.EAR
+        if self._vertical():
+            x, y = self.root.winfo_x(), min(max(e.y_root - self._dy, t - E), b - self.W - E)
+        else:
+            x, y = min(max(e.x_root - self._dx, l - E), r - self.W - E), self.root.winfo_y()
+        self.root.geometry(f"+{x}+{y}")
 
     def _pin(self, _e=None):
         """Clic derecho: queda fijo abierto (o lo suelta)."""
@@ -2377,17 +2481,20 @@ class Api:
         return {"keep_audio": st.get("keep_audio", False),
                 "label_speakers": st.get("label_speakers", True),
                 "theme": theme, "dark": dark_mode(theme),   # resuelto acá: la UI no espera otra llamada
+                "edge": st.get("edge", "top"),
                 "name": st.get("name", ""), "key_set": bool(st.get("key")),
                 "gemini_set": bool(st.get("gemini_key")),
                 "chat_model": st.get("chat_model", ""),
                 "chat_model_def": GEMINI_CHAT if st.get("gemini_key") else CHAT}
 
     def save_settings(self, keep_audio, label_speakers, key, theme="auto", name=None,
-                      gemini_key=None, chat_model=None):
+                      gemini_key=None, chat_model=None, edge=None):
         st = load_settings()
         st["keep_audio"] = bool(keep_audio)
         st["label_speakers"] = bool(label_speakers)
         st["theme"] = theme if theme in ("auto", "light", "dark") else "auto"
+        if edge in EDGES:                 # None = la UI no lo manda (quitar Gemini): no se toca
+            st["edge"] = edge
         if name is not None:              # None = la UI no lo manda; "" = borrarlo a propósito
             st["name"] = speaker_label(name)
         if key:
@@ -3531,6 +3638,19 @@ def selftest():
     w._animate(1, instant=True); w._pinned = True
     w._fold(); assert w._open == 1 and not w._anim, "fijado nunca"
     w._pinned = False
+    # los cuatro bordes: cada control cae dentro de la ventana y el tooltip lo encuentra
+    w.recording = True
+    for e in EDGES:
+        w.edge = e; w._place(); w._animate(1, instant=True)
+        cw, ch = w._size()
+        assert (cw < ch) == (e in ("left", "right")), e
+        for tag in ("rec", "mic", "shot", "pause", "note", "gear", "expand", "quit", "drag"):
+            x1, y1, x2, y2 = w.c.bbox(tag)
+            assert -1 <= x1 and x2 <= cw + 1 and -1 <= y1 and y2 <= ch + 1, (e, tag, w.c.bbox(tag))
+        for tag in ("rec", "gear", "lvl"):
+            assert w._tip_at(*w._from(*w._pt(w._ax(tag), 26))) == tag, (e, tag)
+    w.recording = False
+    w.edge = "top"; w._place()
     # «Cerrar TakeMyNotes» manda WM_CLOSE: tiene que pasar por _quit, no destruir a lo bruto
     assert w.root.protocol("WM_DELETE_WINDOW"), "sin protocolo, WM_CLOSE cerraría grabando"
     w.root.destroy()
