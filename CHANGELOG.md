@@ -3,6 +3,74 @@
 Formato: [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 El detalle y el *por qué* de cada decisión están en los mensajes de commit (`git log`).
 
+## [0.8.0] — 2026-09-30
+
+Sale de la revisión del 30/09 (`PLAN.md`): integridad de datos entre los dos procesos, memoria y
+cuota al transcribir, un acta más estable, la Minuta, y la UX que faltaba alrededor.
+
+### Corregido
+
+- **`os.replace` fallaba con `WinError 5` si el otro proceso tenía el JSON abierto.** La ventana
+  relee los JSON en cada poll, así que durante una transcripción pasaba seguido; si le tocaba al
+  patch final, la sesión quedaba `pending` para siempre y con los canales ya borrados. Ahora
+  `_replace()` reintenta, y el resultado se guarda **antes** de borrar los canales crudos: si
+  falla, la sesión queda en error reintentable.
+- **Lectura-modificación-escritura sin lock entre procesos.** Notas, favorito, renombrar,
+  reintentar y chat pasan por `_patch`, y `_patch` toma un mutex nombrado
+  (`Local\TakeMyNotes.patch`): el `threading.Lock` de antes solo valía dentro de un proceso.
+- Borrar una sesión mientras se transcribe ya no deja un `.wav` ni canales huérfanos; borrarla
+  antes de que arranque no tira un traceback.
+- `chat()` con `content=None` o `choices=[]` (Gemini bloqueando, gpt-oss sin tope) fallaba con
+  `'NoneType' object has no attribute 'strip'`; ahora es un error normal y entra el relevo.
+- Dos preguntas seguidas al chat perdían una respuesta; el input se apaga mientras piensa.
+- **Probar** validaba siempre el modelo por defecto de Groq, no el elegido.
+- El poll repintaba el detalle mientras escribías notas, chat o el título (se iba el foco), y
+  podía solaparse consigo mismo.
+- El reproductor de la transcripción se veía por encima del modal de Configuración (`z-index`).
+- Si DPAPI falla, leer la configuración ya no la reescribe en cada lectura.
+- **Eliminar podía decir que funcionó sin haber borrado nada**, y el borrado no tomaba el mutex
+  (un `_patch` en curso podía volver a escribir la sesión). Ahora `remove_session()` borra bajo el
+  mutex, reintenta si el archivo está en uso y, si no puede, la ventana lo avisa.
+- **El reintento automático y uno manual podían arrancar a la vez** y subir el audio dos veces.
+  `claim()` comprueba y reclama la sesión en el mismo lock.
+
+### Cambiado
+
+- **Memoria al transcribir: de ~2,5 GB a ~120 MB** en la reunión de 1 h 45. El audio se lee y
+  normaliza por trozos de 10 min, y el `.wav` de auditoría se mezcla en streaming.
+- **Los trozos mudos no se suben a Whisper**: ahorra cuota de audio (que con dos canales se gasta
+  el doble) y alucinaciones.
+- **Resumen por tramos más rápido en Groq**: tope de salida de 2048 en los tramos y
+  `reasoning_effort=low` para gpt-oss; el título sale del acta (un request menos, justo antes del
+  resumen). `temperature=0.3`.
+- **Acta mejor informada**: cada tramo recibe las notas del usuario y quién es quién de los tramos
+  anteriores, y el acta recibe la fecha para escribir fechas absolutas.
+- La lista cachea por archivo y solo relee los JSON que cambiaron.
+- Los errores de la API se muestran en castellano ("Cuota del día agotada…"), no como JSON crudo.
+- `groq` se importa al usarse: el widget arranca más liviano.
+
+### Añadido
+
+- **Instalador** (`installer.iss`, Inno Setup 6; lo compila `build.bat` si lo encuentra): por
+  usuario y sin admin, con carpeta en el menú Inicio — TakeMyNotes, Sesiones, Configuración,
+  Cerrar, Carpeta de notas, Desinstalar — y opcionales escritorio e inicio con Windows.
+  Argumentos nuevos del `.exe`: `--settings` y `--quit` (cierra con WM_CLOSE, así el widget
+  pregunta si está grabando). `--window` con la ventana ya abierta la trae al frente.
+- **Minuta**: pestaña nueva, documento formal para enviar, generado a pedido desde el acta.
+- **Acciones con tilde** en el acta y vista **Pendientes** (☑) con las abiertas de todas las
+  sesiones, por responsable.
+- **Nivel de audio en vivo** en el widget y aviso ámbar si un canal lleva 60 s sin señal; botón
+  **Probar micro y audio de la PC** en Configuración.
+- **Ctrl+Shift+R** graba/detiene desde cualquier app; tooltips en los botones del widget.
+- **⧉ Copiar acta**, **⧉ Copiar minuta** y **⤓ Exportar .md**.
+- Ventana: `Ctrl+F`, `Esc`, `↑/↓`, `Ctrl+1…7`, `Supr`, `Espacio`; lista agrupada por fecha,
+  contador y ✕ en el buscador, punto ámbar en las sesiones sin acta, toast de estado.
+- Notas con hora intercaladas en la transcripción, clic para saltar el audio.
+- Renombrar «Los demás» (o cualquier hablante) por sesión.
+- Configuración en dos bloques y el aviso de privacidad de Gemini plegado.
+- Accesibilidad: foco visible, `aria-label` en los botones de glifo, contraste de `--muted-48`.
+- `docs/`: cómo está hecha la app por dentro, y el registro de esta revisión ítem por ítem.
+
 ## [0.7.4] — 2026-08-20
 
 Un día sin actas. Las dos cuotas gratuitas agotadas a la vez y el modal de Configuración

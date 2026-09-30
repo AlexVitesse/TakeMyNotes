@@ -6,9 +6,16 @@ import os, re, sys, json, time, wave, base64, ctypes, socket, logging, sqlite3, 
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
+from contextlib import contextmanager
 from functools import lru_cache
 import numpy as np
-from groq import Groq
+# groq se importa donde se usa: arrastra httpx, pydantic y anyio (~0,5-1 s y ~40 MB) y el widget,
+# que es el proceso que vive siempre, no lo necesita hasta que termina una reunión.
+
+
+def Groq(**kw):
+    from groq import Groq as G
+    return G(**kw)
 
 SR = 16000
 BLOCK = 2048
@@ -47,6 +54,11 @@ CHAT_OUT = 4096           # tope de salida. Sin pedirlo, Groq pone 3072 y el tex
 # Gemini, opcional y solo para resumir/chatear (la transcripción sigue en Groq, que es quien
 # tiene Whisper). Expone un endpoint con la misma forma que el de OpenAI, así que el SDK de Groq
 # le habla tal cual cambiándole la base_url: cero dependencias nuevas.
+TRAMO_OUT = 2048          # los tramos salen en 400-800 tokens: pedir 4096 era pagar 7,2k de TPM por
+                          # request y esperar ~55 s entre tramos. Con 2048 (y el "pensar" de
+                          # gpt-oss en low) son 5,2k y ~40 s. Solo Groq: Gemini no tiene TPM.
+TEMP = 0.3                # esto es extracción: el 1.0 por defecto da actas distintas en cada
+                          # corrida e inventa más
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GEMINI_CHAT = "gemini-3.7-flash"
 GEMINI_CHARS = 400000     # ~100k tokens: la reunión entera en un request, sin trocear
@@ -112,12 +124,35 @@ def _open_wav(path):
     return w
 
 
-def read_wav(path):
-    if not os.path.exists(path):
-        return np.zeros(0, "float32")
-    with wave.open(path, "rb") as w:
-        raw = w.readframes(w.getnframes())
-    return np.frombuffer(raw, "<i2").astype("float32") / 32767.0
+def wav_chunks(paths, secs=CHUNK_SECS):
+    """Los WAV de `paths` en trozos crudos de `secs`, leídos de a uno. Antes se cargaba el canal
+    entero en float32 y se duplicaba normalizado: una hora son 230 MB por array, y la reunión de
+    1 h 45 llegaba a ~2,5 GB de pico (MemoryError en una máquina de 8 GB con Teams abierto). Un
+    trozo de 10 min son 38 MB. Con dos rutas los mezcla trozo a trozo, alineados por tiempo."""
+    ws = [wave.open(p, "rb") for p in paths if os.path.exists(p)]
+    try:
+        while True:
+            parts = []
+            for w in ws:
+                x = np.frombuffer(w.readframes(SR * secs), "<i2").astype("float32")
+                x /= 32767.0
+                parts.append(x)
+            if not any(len(x) for x in parts):
+                return
+            yield parts[0] if len(parts) == 1 else mix_arrays(*parts)
+    finally:
+        for w in ws:
+            w.close()
+
+
+def write_mix(dst, paths):
+    """El .wav de auditoría, mezclado en streaming: nunca tiene la reunión entera en memoria."""
+    w = _open_wav(dst)
+    try:
+        for x in wav_chunks(paths):
+            w.writeframes(_to_i16(x))
+    finally:
+        w.close()
 
 
 def wav_frames(path):
@@ -134,12 +169,16 @@ def write_mono(path, samples):
 
 
 def cleanup(x):
-    """Quita DC y normaliza el pico. # ponytail: sin denoise espectral; subir si hace falta."""
+    """Quita DC y normaliza el pico, EN SITIO (cada copia de un trozo son 38 MB). Se aplica por
+    trozo: normalizar por tramo es igual o mejor para Whisper que por sesión entera.
+    # ponytail: sin denoise espectral; subir si hace falta."""
     if len(x) == 0:
         return x
-    x = x - x.mean()
+    x -= x.mean()
     peak = float(np.abs(x).max())
-    return x * (0.9 / peak) if peak > 0 else x
+    if peak > 0:
+        x *= 0.9 / peak
+    return x
 
 
 def mix_arrays(mic, loop):
@@ -198,6 +237,9 @@ class Recorder:
         # de guarda, un solo chasquido lo deja alto para siempre (ver rms)
         self.mic_voice = self.mic_blocks = self.loop_voice = self.loop_blocks = 0
         self.last_sound = time.time()     # el más reciente de los dos canales
+        # rms del último bloque de cada canal: el widget lo dibuja en vivo. "¿Está entrando el
+        # audio?" se contestaba al terminar la reunión, con una hora grabada del canal equivocado
+        self.mic_level = self.loop_level = 0.0
 
     def _cap(self, device, path, is_mic):
         w = _open_wav(path)
@@ -208,15 +250,18 @@ class Recorder:
                     if self.pause_evt.is_set() or (is_mic and self.mute_evt.is_set()):
                         continue          # hay que drenar igual: si no, el device se atrasa
                     if len(b):
-                        voz = rms(b) > VOICE
+                        lv = rms(b)
+                        voz = lv > VOICE
                         if voz:
                             self.last_sound = time.time()   # dos hilos, un float: gana el reciente
                         if is_mic:
                             self.mic_blocks += 1
                             self.mic_voice += voz
+                            self.mic_level = lv
                         else:
                             self.loop_blocks += 1
                             self.loop_voice += voz
+                            self.loop_level = lv
                         w.writeframes(_to_i16(b))
         except Exception as e:
             self.errors.append(str(e))    # el str y no la excepción: el traceback retiene el frame
@@ -299,7 +344,10 @@ def load_settings():
                 d[k] = _unprotect(enc)
             except Exception:   # blob de otra cuenta o máquina: hay que pegar la key otra vez
                 log.warning("no se pudo descifrar %s", k, exc_info=True)
-    if any(raw.get(k) for k in KEYS):   # legado en claro: reescribirlo cifrado y quitar el plano
+    # legado en claro: reescribirlo cifrado y quitar el plano. Salvo que esté en claro PORQUE
+    # DPAPI falló (_plain): reintentar reescribiría el archivo en cada lectura, y el widget lo
+    # relee cada vez que cambia el mtime.
+    if any(raw.get(k) for k in KEYS) and not raw.get("_plain"):
         try:
             save_settings(d)
         except Exception:   # carpeta de solo lectura: leer settings nunca debe romper la app
@@ -323,7 +371,8 @@ def _env_key(name):
 
 
 def save_settings(d):
-    out = {k: v for k, v in d.items() if k not in KEYS and not k.endswith("_enc")}
+    out = {k: v for k, v in d.items()
+           if k not in KEYS and not k.endswith("_enc") and k != "_plain"}
     for k in KEYS:
         if not d.get(k):
             continue
@@ -331,11 +380,29 @@ def save_settings(d):
             out[k + "_enc"] = _protect(d[k])
         except Exception:
             log.exception("DPAPI no disponible: %s se guarda en claro", k)
-            out[k] = d[k]
+            out[k], out["_plain"] = d[k], True
     tmp = SETTINGS_PATH + ".tmp"      # atómico como store_session: el widget lo relee cada
     with open(tmp, "w", encoding="utf-8") as f:      # 500 ms y no puede ver un JSON a medias
         json.dump(out, f)
-    os.replace(tmp, SETTINGS_PATH)
+    _replace(tmp, SETTINGS_PATH)
+
+
+def _aguanta(op, *args, tries=10):
+    """os.replace / os.remove que aguantan a un lector. En Windows, si el otro proceso tiene el
+    archivo abierto (la ventana relee los JSON en cada poll, OneDrive los bloquea al subirlos)
+    dan PermissionError [WinError 5]: Python abre sin FILE_SHARE_DELETE. Esas lecturas duran
+    milisegundos, así que esperar un poco alcanza."""
+    for i in range(tries):
+        try:
+            return op(*args)
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.02)
+
+
+def _replace(tmp, dst):
+    return _aguanta(os.replace, tmp, dst)
 
 
 def spath(sid):
@@ -364,26 +431,84 @@ def store_session(s):
     tmp = spath(s["id"]) + ".tmp"       # escritura atómica: el otro proceso nunca ve un JSON a medias
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(s, f, ensure_ascii=False)
-    os.replace(tmp, spath(s["id"]))
+    _replace(tmp, spath(s["id"]))
 
 
-_PATCH_LOCK = threading.Lock()
+PATCH_MUTEX = "Local\\TakeMyNotes.patch"
 
 
-def _patch(sid, **kw):
+@contextmanager
+def _patch_lock():
+    """Mutex NOMBRADO y no un threading.Lock: el widget y la ventana son dos procesos que
+    escriben el mismo JSON, y un lock de hilos solo vale dentro de uno. Sirve también entre
+    hilos del mismo proceso (el dueño de un mutex de Windows es el hilo). Si alguien lo retiene
+    más de 5 s se sigue sin él: mejor una carrera improbable que la app colgada."""
+    k = _k32()
+    h = k.CreateMutexW(None, False, PATCH_MUTEX)
+    got = h and k.WaitForSingleObject(h, 5000) in (0, 0x80)    # WAIT_OBJECT_0 / ABANDONED
+    if h and not got:
+        log.warning("mutex de sesiones ocupado, sigo sin él")
+    try:
+        yield
+    finally:
+        if got:
+            k.ReleaseMutex(h)
+        if h:
+            k.CloseHandle(h)
+
+
+def _patch(sid, fn=None, **kw):
     """Cambia campos sueltos sobre lo que hay EN DISCO, no sobre una copia vieja en memoria:
     transcribir tarda minutos y en ese rato la ventana puede guardar notas o el nombre. Un
-    valor None borra el campo. Si la sesión ya no está, no la resucita."""
-    with _PATCH_LOCK:                 # dos hilos de canal reportando progreso a la vez
+    valor None borra el campo. `fn(s)` modifica a partir de lo leído (alternar favorito, sumar
+    al chat) dentro del mismo lock; si devuelve False, no se escribe nada y _patch devuelve None
+    (comprobar y reclamar de una vez, ver claim). Si la sesión ya no está, no la resucita."""
+    with _patch_lock():
         if not os.path.exists(spath(sid)):
             return None
         s = load_session(sid)
+        if fn and fn(s) is False:
+            return None
         s.update(kw)
         for k, v in kw.items():
             if v is None:
                 s.pop(k, None)
         store_session(s)
         return s
+
+
+def claim(sid, manual=False):
+    """Pasa una sesión a 'pending' con este proceso de dueño, solo si nadie la está
+    transcribiendo ya. Comprobar y reclamar van dentro del mismo lock: con la comprobación
+    afuera, el reintento automático del widget y un Reintentar de la ventana en el mismo segundo
+    arrancaban los dos, subían el audio dos veces y el último en terminar pisaba al otro.
+    El automático además solo toma lo que sigue en error y con intentos disponibles; el manual
+    devuelve todos los intentos. -> la sesión reclamada, o None."""
+    def fn(s):
+        if s.get("status") == "pending" and not _stale(s):
+            return False                          # la está transcribiendo otro proceso vivo
+        if not manual and (_view(s).get("status") != "error"
+                           or (s.get("retries") or 0) >= AUTO_RETRIES):
+            return False                          # ya no hace falta (o se agotaron los intentos)
+        s.pop("error", None)
+        s.update(status="pending", pid=os.getpid())
+        if manual:
+            s["retries"] = 0
+    return _patch(sid, fn)
+
+
+def remove_session(sid):
+    """Borra el JSON bajo el mismo mutex que _patch. Afuera, un _patch que ya había comprobado
+    que existía la escribía de vuelta después del borrado y la sesión resucitaba.
+    -> True si ya no está."""
+    with _patch_lock():
+        try:
+            _aguanta(os.remove, spath(sid))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.warning("no se pudo borrar %s", sid, exc_info=True)
+    return not os.path.exists(spath(sid))
 
 
 def set_stage(sid, text):
@@ -468,7 +593,7 @@ def sync_index():
                 continue                            # un .json que no es sesión: no se indexa
             _drop(c, sid)
             body = "\n".join(x for x in (s.get("transcript"), s.get("notes"),
-                                         s.get("summary")) if x)
+                                         s.get("summary"), s.get("minuta")) if x)
             c.execute("insert into notes(sid, name, body) values(?,?,?)",
                       (sid, s.get("name") or "", body))
             c.execute("insert into stamp values(?,?)", (sid, mt))
@@ -558,28 +683,39 @@ def has_voice(raw, t0, t1):
     return not len(part) or rms(part) > SILENCE
 
 
-def n_chunks(samples):
-    """Trozos de CHUNK_SECS en que se va a partir un canal: el total para el progreso."""
-    step = SR * CHUNK_SECS
-    return max(1, -(-len(samples) // step))
+def n_chunks(frames):
+    """Trozos de CHUNK_SECS en que se va a partir un canal de `frames` muestras: el total
+    para el progreso."""
+    return max(1, -(-frames // (SR * CHUNK_SECS)))
 
 
-def transcribe_channel(client, samples, label, done=None, raw=None):
-    """Devuelve [(t_seg, label, texto)] con timestamps absolutos. `raw` es el mismo canal sin
-    normalizar: con él se tira lo que el modelo alucina en los tramos mudos (ver has_voice)."""
-    segs, step = [], SR * CHUNK_SECS
+def tramo_mudo(raw, win=30):
+    """¿Ninguna ventana de `win` s pasa de SILENCE? Un canal que no es mudo en total puede tener
+    trozos enteros de silencio (la presentación de 40 min donde solo habla el otro). Subirlo
+    son 19 MB y cuota de audio por hora — que con dos canales se gasta el doble — para que
+    Whisper alucine sobre el silencio y has_voice lo tire igual."""
+    step = SR * win
+    return all(rms(raw[i:i + step]) <= SILENCE for i in range(0, len(raw), step))
+
+
+def transcribe_channel(client, chunks, label, done=None):
+    """`chunks`: trozos CRUDOS de CHUNK_SECS (ver wav_chunks). Devuelve [(t, label, texto, fin)]
+    con timestamps absolutos. Se sube la copia normalizada; con la cruda se tira lo que el
+    modelo alucina en los tramos mudos (ver has_voice)."""
+    segs, base = [], 0.0
     tmp = os.path.join(NOTAS, f"_seg_{os.getpid()}_{threading.get_ident()}.wav")
     try:
-        for i in range(0, len(samples), step):
-            write_mono(tmp, samples[i:i + step])
-            with open(tmp, "rb") as f:
-                r = client.audio.transcriptions.create(
-                    file=("c.wav", f.read()), model=WHISPER, language="es",
-                    response_format="verbose_json")
-            base, chunk = i / SR, None if raw is None else raw[i:i + step]
-            for t, end, txt in _segments(r):
-                if txt and has_voice(chunk, t, end):
-                    segs.append((base + t, label, txt, base + end))
+        for raw in chunks:
+            if not tramo_mudo(raw):
+                write_mono(tmp, cleanup(raw.copy()))
+                with open(tmp, "rb") as f:
+                    r = client.audio.transcriptions.create(
+                        file=("c.wav", f.read()), model=WHISPER, language="es",
+                        response_format="verbose_json")
+                for t, end, txt in _segments(r):
+                    if txt and has_voice(raw, t, end):
+                        segs.append((base + t, label, txt, base + end))
+            base += len(raw) / SR
             if done:
                 done()
     finally:
@@ -680,6 +816,25 @@ def _retryable(e):
     return getattr(e, "status_code", None) in (429, 500, 502, 503, 504)
 
 
+def humano(e):
+    """El error de una API como lo lee una persona. Sin esto la ventana mostraba
+    "Error code: 429 - {'error': {'message': 'Rate limit reached..." como error del acta."""
+    code = getattr(e, "status_code", None)
+    if e.__class__.__name__ in ("APIConnectionError", "APITimeoutError"):
+        return "Sin conexión con el servicio de IA."
+    if code == 401:
+        return "API key inválida: revísala en ⚙."
+    if code == 429 and _agotado_el_dia(e):
+        return "Cuota del día agotada: cambia el modelo en ⚙ o espera a mañana."
+    if code == 429:
+        return "Demasiadas peticiones seguidas: prueba de nuevo en un minuto."
+    if code == 413:
+        return "La reunión no cabe en un request."
+    if code == 404:
+        return "Ese modelo no existe: cámbialo en ⚙."
+    return str(e)[:200]
+
+
 def switch_chat(client):
     """Groq retira modelos cada pocos meses sin avisar: llama-3.3-70b-versatile se fue con un 404
     y dejó todas las sesiones en error hasta tocar el código. Ante un 404 saltamos al primer
@@ -718,7 +873,7 @@ def chat_client(st=None):
     # reintentos que sirven (con esperas de verdad) los hace chat().
     elegido = (st.get("chat_model") or "").strip()
     c = Groq(api_key=st.get("key", ""), max_retries=0)
-    c.modelo, c.trozo, c.tope, c.relevo = CHAT, CHAT_CHARS, CHAT_OUT, None
+    c.modelo, c.trozo, c.tope, c.relevo, c.tramo_out = CHAT, CHAT_CHARS, CHAT_OUT, None, TRAMO_OUT
     if st.get("gemini_key"):
         # El SDK de Groq NO sirve acá aunque el endpoint sea compatible: pega
         # "/openai/v1/chat/completions" a la base_url y Gemini espera "/chat/completions".
@@ -726,31 +881,42 @@ def chat_client(st=None):
         from openai import OpenAI
         g = OpenAI(api_key=st["gemini_key"], base_url=GEMINI_URL, max_retries=0)
         g.modelo, g.trozo, g.tope = elegido or GEMINI_CHAT, GEMINI_CHARS, GEMINI_OUT
+        g.tramo_out = None
         g.relevo = c if st.get("key") else None
         return g
     c.modelo = elegido or CHAT
     return c
 
 
-def chat(client, system, user, tries=4, out=None):
+def chat(client, system, user, tries=4, out=None, effort=None):
     # getattr y no client.modelo: el cliente de Whisper y los de los tests no pasan por
     # chat_client() y tienen que seguir funcionando contra Groq.
     model = getattr(client, "modelo", CHAT)
     out = out or getattr(client, "tope", CHAT_OUT)
     for i in range(1, tries + 1):
+        # reasoning_effort solo a gpt-oss: el "pensar" sale del mismo balde de tokens por minuto
+        # y otro modelo podría rechazar un parámetro que no conoce
+        extra = {"reasoning_effort": effort} if effort and "gpt-oss" in model else None
         try:
             r = client.chat.completions.create(model=model, max_completion_tokens=out,
+                temperature=TEMP, extra_body=extra,
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": user}])
+            if not r.choices:     # Gemini, cuando bloquea por seguridad: lista vacía
+                raise RuntimeError(f"{model} no devolvió texto")
             c = r.choices[0]
             # Sin tope explícito Groq pone 3072, y en un modelo de razonamiento el "pensar"
             # gasta de ese mismo presupuesto: el acta salía cortada a media palabra, distinto
             # en cada corrida. Si aun así se corta, se avisa en el texto: un resumen truncado
             # que no lo dice se lee como si la reunión hubiera terminado ahí.
-            t = c.message.content.strip()
+            # content=None pasa (gpt-oss o Gemini que agotaron el tope pensando, o un bloqueo):
+            # sin texto y sin corte es un fallo, y con_relevo se lo pasa al otro proveedor.
+            t = (c.message.content or "").strip()
             if c.finish_reason == "length":
                 log.warning("respuesta truncada (%s tokens)", out)
                 t += "\n\n[…cortado: el modelo llegó a su límite de salida]"
+            elif not t:
+                raise RuntimeError(f"{model} no devolvió texto")
             return t
         except Exception as e:
             # el relevo de modelo es cosa de Groq: CHAT_ALT son modelos suyos y models.list()
@@ -790,6 +956,8 @@ SUM_SYS = """Sos el acta de una reunión: en español, combinando las NOTAS del 
 TRANSCRIPCIÓN. Formato: párrafos y bullets de un solo nivel, con los títulos de sección en una
 línea suelta y en mayúsculas. Negrita con **así** sí se ve. Nada de tablas, ni encabezados de
 markdown, ni líneas de guiones: la ventana no las renderiza y salen como texto crudo.
+La PRIMERA línea es "TÍTULO: " y un título de 3 a 6 palabras para la reunión, sin comillas ni
+punto. Después, el acta.
 Secciones, en este orden:
 QUIÉNES: una línea por persona con nombre, lado (de quien convoca / del cliente / no se sabe) y
 rol concreto (qué hace, no "participante"). Para el lado mirá quién dice "su/ustedes" hablando
@@ -828,7 +996,10 @@ texto; si viene mal transcrito, copialo igual y agregá [sic?] en vez de arregla
 una restricción del cliente en tarea propia, ni un "podríamos" en un plan, ni una anécdota en un
 entregable. Lo que se está vendiendo no es lo que ya existe. No inventes responsables ni equipos.
 No expandas siglas. Si una frase quedó incomprensible en la transcripción, tirala en vez de
-adivinar qué quiso decir: una pregunta que no se entiende no es una pregunta pendiente."""
+adivinar qué quiso decir: una pregunta que no se entiende no es una pregunta pendiente.
+Fechas: viene la FECHA de la reunión. Si alguien dice una fecha relativa ("el viernes", "en dos
+semanas") y se puede calcular desde ahí, escribí la fecha absoluta dd/mm/aaaa y entre paréntesis
+lo que se dijo. Si no se puede calcular, copiá lo que se dijo tal cual."""
 TRAMO_SYS = """Extraé en español, en bullets y sin introducción, lo que pasa en este TRAMO de una
 reunión. Empezá con una línea PERSONAS: y ahí anotá a cada quien se nombre en el tramo con la
 frase textual que lo delata: cómo se presentó, cómo lo llamaron, o un pedazo de lo que dijo donde
@@ -838,7 +1009,94 @@ Después, un bullet por cosa, cada uno marcado con DECIDIDO / PROPUESTO / DESCAR
 ENTREGADO / PREGUNTA SIN RESPONDER / TAREA (con responsable, o SIN DUEÑO). Si alguien tumba,
 frena o le pone un pero a algo, va como DESCARTADO con la frase con la que lo tumbó: es lo
 primero que se pierde al resumir. Copiá los nombres propios, marcas y cifras tal cual aparecen,
-aunque estén mal transcritos. Solo lo que está en el texto."""
+aunque estén mal transcritos. Solo lo que está en el texto.
+Si arriba del tramo vienen NOTAS del usuario, buscá en el tramo lo que ellas mencionan; no las
+copies. Si viene HASTA AHORA, es quién es quién según los tramos anteriores: usalo para reconocer
+a la gente y no lo repitas, salvo lo que este tramo agregue."""
+MINUTA_SYS = """Redactá la MINUTA formal de una reunión, en español, para enviar a los asistentes.
+Material: el ACTA ya hecha, las NOTAS del usuario y los datos de la reunión. No inventes nada que
+no esté ahí. Texto plano: títulos en mayúsculas en una línea suelta, listas con "- " o "1. ",
+nada de tablas, ni encabezados de markdown, ni líneas de guiones.
+Fechas absolutas en dd/mm/aaaa calculadas desde la fecha de la reunión; lo que no se pueda
+calcular va como se dijo, entre comillas. Ningún nombre que no esté en el acta. Lo inferido lleva
+"(inferido)". Lo que no se sabe dice "No se definió" o "No se indica": nunca vacío ni inventado.
+Formato exacto:
+MINUTA DE REUNIÓN
+
+Reunión: <título>
+Fecha: <dd/mm/aaaa>
+Hora: <hh:mm> a <hh:mm> (Duración: <n> min)
+Modalidad: <Virtual / Presencial / No se indica>
+Convocó: <nombre o No se indica>
+
+ASISTENTES
+- <Nombre> — <cargo o área> — <de quien convoca / del cliente / no se sabe>
+
+ORDEN DEL DÍA
+1. <Tema tratado, en el orden en que apareció>
+
+DESARROLLO
+1. <Tema>
+   Discusión: <dos o tres líneas con lo que se planteó y quién>
+   Conclusión: <a qué se llegó, o "Sin conclusión">
+
+ACUERDOS Y COMPROMISOS
+1. <Acuerdo> — Responsable: <nombre o SIN DUEÑO> — Fecha: <dd/mm/aaaa o "No se definió">
+
+TEMAS PENDIENTES
+- <Lo propuesto sin respuesta y las preguntas abiertas>
+
+PRÓXIMA REUNIÓN
+<Fecha, hora y tema si se mencionaron; si no, "No se definió">
+
+Elaboró: TakeMyNotes (borrador automático; revisar antes de enviar)"""
+DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+
+
+def cuando(s):
+    """Fecha y hora de inicio de una sesión para el modelo, con el día de la semana: sin eso "el
+    viernes" no se puede pasar a fecha."""
+    t0 = session_start(s.get("id"))
+    return f"{t0:%d/%m/%Y %H:%M} ({DIAS[t0.weekday()]})"
+
+
+def split_title(text):
+    """El acta trae el título en la primera línea ("TÍTULO: …"). Pedírselo ahí y no en un
+    request aparte ahorra uno por sesión, y en Groq ese request salía justo antes del resumen,
+    del mismo balde por minuto. -> (título, acta sin esa línea); ("", texto) si no vino."""
+    m = re.match(r"\s*\**\s*T[IÍ]TULO\s*\**\s*:\s*\**(.*)(?:\n|$)", text or "", re.I)
+    if not m:
+        return "", text
+    return clean_name(m.group(1).strip(' "*.'), 60), text[m.end():].lstrip()
+
+
+# Los mismos criterios que md() en la ventana: si difieren, el tilde de una acción se le pone
+# a otra. check_ui.js y selftest prueban los dos lados contra la misma acta.
+_HEAD = re.compile(r"^(?:#{1,4}\s+(.*)|([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ0-9 ]{2,40}"
+                   r"(?: \([^)\n]{1,40}\))?):?[ \t]*)$")
+_ITEM = re.compile(r"^\s*(?:[-*•]|\d+\.)\s+(.*)$")
+_WHO = re.compile(r"^\s*\*\*(.+?)\*\*\s*:?\s*$")
+
+
+def acciones(summary):
+    """Las ACCIONES del acta como [(índice, responsable, texto)]. El índice cuenta los bullets
+    de esa sección en orden, igual que md() al ponerles el checkbox: es lo que va a s["done"].
+    El responsable es la última línea suelta en negrita (**Eric**) que las encabeza."""
+    out, dentro, who = [], False, ""
+    for line in (summary or "").splitlines():
+        h = _HEAD.match(line)
+        if h:
+            dentro = (h.group(1) or h.group(2) or "").strip().upper().startswith("ACCIONES")
+            who = ""
+            continue
+        if not dentro:
+            continue
+        w, it = _WHO.match(line), _ITEM.match(line)
+        if it:
+            out.append((len(out), who, re.sub(r"\*\*(.+?)\*\*", r"\1", it.group(1)).strip()))
+        elif w:
+            who = w.group(1).strip()
+    return out
 
 
 def con_relevo(fn, client, *args):
@@ -858,11 +1116,11 @@ def con_relevo(fn, client, *args):
         return fn(rel, *args)
 
 
-def summarize_text(client, notes, transcript, progress=None):
-    return con_relevo(_summarize, client, notes, transcript, progress)
+def summarize_text(client, notes, transcript, progress=None, when=""):
+    return con_relevo(_summarize, client, notes, transcript, progress, when)
 
 
-def _summarize(client, notes, transcript, progress=None):
+def _summarize(client, notes, transcript, progress=None, when=""):
     """Una reunión de una hora son ~13k tokens y el tier gratis de Groq acepta 8k por minuto:
     de una sola pieza devuelve 413. Se resume por tramos y después se resumen los resúmenes.
     # ponytail: trocear es lo que hace caber la reunión, y también el techo de calidad del acta.
@@ -873,24 +1131,33 @@ def _summarize(client, notes, transcript, progress=None):
     # de verdad es no trocear: con un TPM que acepte ~17k, esto es un solo request y sobra."""
     trozo = getattr(client, "trozo", CHAT_CHARS)
     parts = split_text(transcript, trozo)
+    cab = f"FECHA DE LA REUNIÓN: {when}\n\n" if when else ""
     def step(i, n):
         if progress:
             progress(i, n)
     if len(parts) <= 1:
         step(1, 1)
-        return chat(client, SUM_SYS, f"NOTAS:\n{notes}\n\nTRANSCRIPCIÓN:\n{transcript}")
-    outs = []
+        return chat(client, SUM_SYS, f"{cab}NOTAS:\n{notes}\n\nTRANSCRIPCIÓN:\n{transcript}")
+    # A cada tramo le llegan las notas (suelen ser <1000 chars y dicen qué buscar) y las líneas
+    # PERSONAS de los anteriores: sin eso, quién es quién se reiniciaba cada 12 000 caracteres.
+    guia = f"NOTAS del usuario:\n{notes[:1500]}\n\n" if (notes or "").strip() else ""
+    outs, personas = [], []
     for i, p in enumerate(parts, 1):      # secuencial a propósito: el límite es por minuto
         step(i, len(parts) + 1)
-        outs.append(chat(client, TRAMO_SYS, p))
+        previo = f"HASTA AHORA:\n{chr(10).join(personas)[:800]}\n\n" if personas else ""
+        o = chat(client, TRAMO_SYS, f"{guia}{previo}TRAMO:\n{p}",
+                 out=getattr(client, "tramo_out", None), effort="low")
+        outs.append(o)
+        personas += [x.strip() for x in o.splitlines()
+                     if x.strip().upper().startswith("PERSONAS") and x.strip() not in personas]
     step(len(parts) + 1, len(parts) + 1)
     joined = "\n\n".join(outs)
     # Reunión larguísima: ni los resúmenes de los tramos entran en un request. Se resumen otra vez
     # por el mismo camino; la guarda es que hayan encogido, si no esto no terminaría nunca.
     if len(joined) > trozo and len(joined) < len(transcript):
-        return _summarize(client, notes, joined, progress)
-    return chat(client, SUM_SYS,
-                f"NOTAS:\n{notes}\n\nTRANSCRIPCIÓN (resúmenes de cada tramo, en orden):\n" + joined)
+        return _summarize(client, notes, joined, progress, when)
+    return chat(client, SUM_SYS, f"{cab}NOTAS:\n{notes}\n\n"
+                "TRANSCRIPCIÓN (resúmenes de cada tramo, en orden):\n" + joined)
 
 
 def ask_text(client, transcript, q):
@@ -912,6 +1179,23 @@ def _ask(client, transcript, q):
         return "No encontré nada sobre eso en esta sesión."
     return chat(client, "Unificá en español estas respuestas parciales sobre la misma reunión "
                         "en una sola, sin repetir.", f"PREGUNTA: {q}\n\n" + "\n\n".join(hits))
+
+
+def minuta_text(client, s):
+    return con_relevo(_minuta, client, s)
+
+
+def _minuta(client, s):
+    """La minuta sale del ACTA y no de la transcripción: un solo request que entra en Groq sin
+    trocear (acta ~3-4k chars + notas) y gasta una sola de las llamadas diarias de Gemini.
+    Fecha, hora de fin y duración van calculadas: son cuentas, no algo para que adivine el modelo."""
+    t0, dur = session_start(s.get("id")), int(s.get("dur") or 0)
+    fin = t0 + datetime.timedelta(seconds=dur)
+    datos = (f"Reunión: {s.get('name') or 'Sin título'}\n"
+             f"Fecha: {t0:%d/%m/%Y} ({DIAS[t0.weekday()]})\n"
+             f"Hora: {t0:%H:%M} a {fin:%H:%M} (Duración: {max(1, round(dur / 60))} min)")
+    return chat(client, MINUTA_SYS, f"DATOS:\n{datos}\n\nNOTAS:\n{s.get('notes') or '(sin notas)'}"
+                                     f"\n\nACTA:\n{s.get('summary', '')}")
 
 
 def clean_name(n, limit=80):
@@ -947,8 +1231,7 @@ _TX_LOCK = threading.Lock()
 def do_transcription(sid):
     """Transcribe una sesión pendiente y la resume. Lo usan el widget (nueva) y la ventana
     (reintento). Se puede grabar la reunión siguiente mientras esto corre, pero DE UNA A LA VEZ:
-    dos transcripciones juntas son ~2 GB de WAV en float32 en memoria y el doble de tokens por
-    minuto contra el mismo límite de Groq. La que espera se ve "En cola…" en la ventana.
+    dos transcripciones juntas son el doble de tokens por minuto contra el mismo límite de Groq. La que espera se ve "En cola…" en la ventana.
     # ponytail: lock de proceso, no de máquina. Un Reintentar desde la ventana (otro proceso)
     # sí puede solaparse con el widget; lo que ya evitaba eso es el claim a 'pending'."""
     if _TX_LOCK.locked():
@@ -961,25 +1244,24 @@ def _do_transcription(sid):
     """Escribe con _patch y no con la copia que leyó al empezar: esto tarda minutos y en ese
     rato la ventana puede estar guardando notas o renombrando."""
     # el dueño es quien transcribe: lo lee _stale para saber si la sesión quedó huérfana
-    s = _patch(sid, pid=os.getpid(), stage="Transcribiendo…") or load_session(sid)
+    s = _patch(sid, pid=os.getpid(), stage="Transcribiendo…")
+    if not s:                         # la borraron antes de arrancar
+        return log.info("sesión %s ya no está", sid)
     st = load_settings()
-    mixed, upd, warn = None, {}, [s.get("warn")]
+    chans = [chan_path(sid, "mic"), chan_path(sid, "loop")]
+    upd, warn = {}, [s.get("warn")]
     try:
         if not st.get("key"):
             raise RuntimeError("Falta la API key de Groq (Configuración).")
         client = Groq(api_key=st["key"], max_retries=4)
-        # los dos canales, normalizados y crudos: el crudo es el que dice dónde había voz de
-        # verdad y dónde el modelo se la inventó sobre el silencio (ver has_voice)
-        mic_raw, loop_raw = read_wav(chan_path(sid, "mic")), read_wav(chan_path(sid, "loop"))
-        mic, loop = cleanup(mic_raw), cleanup(loop_raw)
         me = speaker_label(st.get("name")) or MIC_LABEL   # "Eric:" en vez de "Yo:" si lo configuró
-        jobs = [(mic, me, s.get("mic_silent"), mic_raw),
-                (loop, THEM_LABEL, s.get("loop_silent"), loop_raw)]
-        if not st.get("label_speakers", True):
-            mixed = mix_arrays(mic, loop)
-            jobs = [(mixed, "", False, mix_arrays(mic_raw, loop_raw))]
-        jobs = [(samp, lbl, raw) for samp, lbl, silent, raw in jobs if not silent]
-        total, cnt, lk = sum(n_chunks(j[0]) for j in jobs) or 1, [0], threading.Lock()
+        mixed = not st.get("label_speakers", True)
+        jobs = ([(chans, "")] if mixed else
+                [([p], lbl) for p, lbl, silent in ((chans[0], me, s.get("mic_silent")),
+                                                   (chans[1], THEM_LABEL, s.get("loop_silent")))
+                 if not silent])
+        total = sum(n_chunks(max(map(wav_frames, ps))) for ps, _ in jobs) or 1
+        cnt, lk = [0], threading.Lock()
 
         def done():                   # progreso real: trozos de audio ya transcritos
             with lk:
@@ -987,10 +1269,10 @@ def _do_transcription(sid):
             set_stage(sid, f"Transcribiendo… {k}/{total}")
 
         with ThreadPoolExecutor(2) as ex:   # los dos canales son llamadas Groq independientes
-            futs = [ex.submit(transcribe_channel, client, samp, lbl, done, raw)
-                    for samp, lbl, raw in jobs]
+            futs = [ex.submit(transcribe_channel, client, wav_chunks(ps), lbl, done)
+                    for ps, lbl in jobs]
             segs = [seg for f in futs for seg in f.result()]
-        if mixed is None:
+        if not mixed:
             segs, echo, aporte = drop_echo(segs, me)
             log.info("%s: eco en el micro %.0f%%, aporte propio %.0f%%", sid, echo * 100,
                      aporte * 100)
@@ -1006,31 +1288,48 @@ def _do_transcription(sid):
                             "separar los hablantes (usá auriculares)")
         upd["turns"] = dialog_turns(segs)      # con tiempo: la ventana sincroniza el audio
         upd["transcript"] = format_dialog(segs)   # plano: es lo que se indexa y lo que va a Groq
-        upd["name"] = name_session(client, upd["transcript"])
+        # el nombre lo trae el acta (ver split_title); sin nada que resumir, no hay acta
+        if not (upd["transcript"] or s.get("notes") or s.get("name")):
+            upd["name"] = "Sesión sin audio"
         upd["status"] = "done"
         upd["error"] = upd["retries"] = None
     except Exception as e:
         log.exception("transcripción %s", sid)   # el traceback completo, no los 500 chars
         upd["status"] = "error"
-        upd["error"] = str(e)[:500]   # los canales quedan en disco para reintentar
+        upd["error"] = humano(e)[:500]   # los canales quedan en disco para reintentar
         upd["retries"] = (s.get("retries") or 0) + 1   # tope de los reintentos automáticos
     ok = upd["status"] == "done"
-    if ok:
-        try:                          # guardar el .wav nunca puede tumbar una transcripción buena
-            if st.get("keep_audio"):
-                write_mono(os.path.join(NOTAS, f"{sid}.wav"),
-                           mixed if mixed is not None else mix_arrays(mic, loop))
-        except Exception:
-            log.exception("guardar el wav de %s", sid)
-            warn.append("no se pudo guardar el audio")
-        for w in ("mic", "loop"):     # éxito: ya no necesitamos los canales crudos
-            try:
-                os.remove(chan_path(sid, w))
-            except OSError:           # otra corrida concurrente pudo borrarlo ya
-                pass
     upd["warn"] = ", ".join(x for x in warn if x)
     upd["stage"] = "Resumiendo…" if ok else None
-    if _patch(sid, **upd) and ok:     # si la borraron mientras transcribía, no resucitarla
+    # El resultado va a disco ANTES de tocar los canales: si este patch fallaba después de
+    # borrarlos, la sesión quedaba 'pending' con el pid vivo, sin transcripción y sin nada que
+    # reintentar. Si falla, los canales siguen ahí y la sesión queda en error reintentable.
+    try:
+        alive = _patch(sid, **upd)
+    except Exception:
+        log.exception("guardar la transcripción de %s", sid)
+        try:
+            _patch(sid, status="error", stage=None, retries=upd.get("retries"),
+                   error="No se pudo guardar la transcripción: reintenta.")
+        except Exception:
+            log.exception("marcar el error de %s", sid)
+        return
+    if alive and not ok:
+        return
+    # Éxito, o la borraron mientras se transcribía (alive None): en los dos casos los canales
+    # crudos sobran, y el .wav de auditoría solo tiene sentido si la sesión sigue existiendo.
+    if alive and st.get("keep_audio"):
+        try:                          # guardar el .wav nunca puede tumbar una transcripción buena
+            write_mix(os.path.join(NOTAS, f"{sid}.wav"), chans)
+        except Exception:
+            log.exception("guardar el wav de %s", sid)
+            _patch(sid, warn=", ".join(x for x in (upd["warn"], "no se pudo guardar el audio") if x))
+    for p in chans:
+        try:
+            os.remove(p)
+        except OSError:               # otra corrida concurrente pudo borrarlo ya
+            pass
+    if alive:
         auto_summary(sid)
 
 
@@ -1065,13 +1364,33 @@ def auto_summary(sid):
         s = load_session(sid)
         if s.get("summary") or not (s.get("transcript") or s.get("notes")):
             return set_stage(sid, "")
-        text = summarize_text(chat_client(),
-                              s.get("notes", ""), s.get("transcript", ""),
-                              lambda i, n: set_stage(sid, f"Resumiendo… {i}/{n}"))
-        _patch(sid, summary=text, stage=None, sum_error=None)
+        store_summary(sid, summarize_text(chat_client(),
+                                          s.get("notes", ""), s.get("transcript", ""),
+                                          lambda i, n: set_stage(sid, f"Resumiendo… {i}/{n}"),
+                                          cuando(s)))
     except Exception as e:
         log.exception("resumen automático de %s", sid)
-        _patch(sid, stage=None, sum_error=str(e)[:200])   # queda el botón para reintentar
+        # queda el botón para reintentar. Sin acta tampoco hay título: se pide aparte, que es
+        # lo que se hacía siempre antes de sacarlo del acta
+        kw = {}
+        try:
+            s = load_session(sid)
+            if not s.get("name"):
+                kw["name"] = name_session(chat_client(), s.get("transcript"))
+        except Exception:             # borrada, o sin key: el nombre no vale otro traceback
+            log.warning("sin nombre para %s", sid, exc_info=True)
+        _patch(sid, stage=None, sum_error=humano(e), **kw)
+
+
+def store_summary(sid, text):
+    """Guarda un acta nueva. El título que trae va a la sesión solo si no tenía nombre: el que
+    puso el usuario (o una corrida anterior) no se pisa. Las acciones tildadas eran índices del
+    acta vieja: con otra acta no significan nada."""
+    title, text = split_title(text)
+    def fn(s):
+        if title and not s.get("name"):
+            s["name"] = title
+    return _patch(sid, fn, summary=text, stage=None, sum_error=None, done=None)
 
 
 # ---------- servidor de medios de notas/ (solo en el proceso de la ventana) ----------
@@ -1187,7 +1506,9 @@ def _k32():
     """kernel32 con el restype de HANDLE puesto (el c_int por defecto trunca en 64 bits)."""
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     k.CreateMutexW.restype = k.OpenMutexW.restype = k.OpenProcess.restype = ctypes.c_void_p
-    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    k.CloseHandle.argtypes = k.ReleaseMutex.argtypes = [ctypes.c_void_p]
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    k.WaitForSingleObject.restype = wintypes.DWORD
     return k
 
 
@@ -1221,8 +1542,8 @@ def take_lock(name=WINDOW_MUTEX):
     return h
 
 
-def _other_window():
-    """hwnd de la ventana grande. El título no alcanza para identificarla: el widget se llama
+def _app_windows(classes=("WindowsForms",)):
+    """hwnds de la app en OTROS procesos, por clase de ventana. Por defecto la ventana grande. El título no alcanza para identificarla: el widget se llama
     igual, y una ventana del Explorador abierta en esta carpeta también (se llevaba el foco).
     Se pide además que sea WinForms, que es lo que monta pywebview con WebView2 — el widget es
     TkTopLevel y el Explorador CabinetWClass. Si algún día cambia el backend, el ⤡ deja de
@@ -1240,12 +1561,31 @@ def _other_window():
         u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if (pid.value != me and u.IsWindowVisible(hwnd)
                 and name_of(u.GetWindowTextW, hwnd) == "TakeMyNotes"
-                and name_of(u.GetClassNameW, hwnd).startswith("WindowsForms")):
+                and name_of(u.GetClassNameW, hwnd).startswith(classes)):
             found.append(hwnd)
         return True
 
     u.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)(cb), 0)
+    return found
+
+
+def _other_window():
+    found = _app_windows()
     return found[0] if found else None
+
+
+def quit_all(wait=15):
+    """Cierra el widget y la ventana como si se apretara su ✕: lo usan el acceso «Cerrar
+    TakeMyNotes» del menú Inicio y el instalador antes de reemplazar el .exe. WM_CLOSE y no matar
+    el proceso: el widget pregunta si está grabando o transcribiendo, igual que con su ✕.
+    Espera a que los dos mutex se suelten (el SO los suelta al morir cada proceso)."""
+    u = ctypes.windll.user32
+    for h in _app_windows(("WindowsForms", "TkTopLevel")):
+        u.PostMessageW(h, 0x0010, 0, 0)                             # WM_CLOSE
+    t = time.time() + wait
+    while time.time() < t and (lock_held(WINDOW_MUTEX) or lock_held(WIDGET_MUTEX)):
+        time.sleep(0.2)
+    return not (lock_held(WINDOW_MUTEX) or lock_held(WIDGET_MUTEX))
 
 
 def focus_window():
@@ -1298,6 +1638,12 @@ LIGHT = {"pill": "#f5f5f7", "edge": "#d3d3d8", "ink": "#1d1d1f", "dim": "#7a7a7a
          "icon": "#333333", "warn": "#b46b00"}
 DARK = {"pill": "#2c2c2e", "edge": "#48484a", "ink": "#f5f5f7", "dim": "#a1a1a6",
         "icon": "#e5e5ea", "warn": "#ff9f0a"}
+NOSIGNAL = 60             # s grabando sin voz en un canal desde el arranque => avisar en vivo
+HOTKEY = (0x0002 | 0x0004 | 0x4000, ord("R"))   # Ctrl+Shift+R (MOD_CONTROL|SHIFT|NOREPEAT)
+TIPS = {"rec": "Grabar / detener (Ctrl+Shift+R)", "mic": "Cortar mi micrófono",
+        "shot": "Captura de pantalla", "pause": "Pausar", "note": "Notas de la sesión",
+        "gear": "Configuración", "expand": "Abrir la ventana", "quit": "Cerrar",
+        "lvl": "Nivel: micrófono · audio de la PC"}
 
 
 def in_pill(x, y, w, h, r):
@@ -1340,6 +1686,7 @@ class Widget:
     # x de cada control. Un solo sitio: el dibujo y los tests salen de acá, y selftest verifica
     # que ningún halo se pise con otro ni se salga del pill redondeado.
     GRIP, DOT, CLOCK = 18, 34, 46
+    LVL = 116                           # barritas de nivel (micro, PC), a la derecha del reloj
     MIC, SHOT, PAUSE = 162, 188, 214    # controles de la sesión
     SEP = 234                           # separador, centrado entre los dos grupos de halos
     NOTE, GEAR, EXPAND = 254, 280, 306  # controles de la app
@@ -1351,6 +1698,7 @@ class Widget:
         self.tk = tk
         self.root = tk.Tk()
         self.root.title("TakeMyNotes")
+        self.root.protocol("WM_DELETE_WINDOW", lambda: self._quit())   # WM_CLOSE de quit_all
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", KEYCOLOR)
@@ -1371,6 +1719,8 @@ class Widget:
         self._pal = LIGHT
         self._shown = None            # lo último dibujado, para repintar solo si cambió
         self._pressed = None          # tag apretado: se dibuja hundido hasta que suelten
+        self._hot = False             # se apretó el atajo global (lo levanta otro hilo)
+        self._tip = self._tip_tag = self._tip_job = None
         self._read_theme()
         self._draw()
         self._btn("rec", self.toggle)
@@ -1386,8 +1736,70 @@ class Widget:
             self.c.tag_bind(t, "<ButtonPress-1>", self._press)
             self.c.tag_bind(t, "<B1-Motion>", self._move)
         self.root.bind("<ButtonRelease-1>", self._drop)
+        self.c.bind("<Motion>", self._motion)
+        self.c.bind("<Leave>", lambda e: self._set_tip(None))
         threading.Thread(target=self._auto_retry, daemon=True).start()
+        threading.Thread(target=self._hotkey, daemon=True).start()
         self._loop()
+
+    # --- atajo global ---
+    def _hotkey(self):
+        """Ctrl+Shift+R graba/detiene desde cualquier app. RegisterHotKey manda WM_HOTKEY a la
+        cola del hilo que lo registró, y el mainloop de Tk la descartaría: por eso un hilo propio
+        con su bucle de mensajes, que solo levanta un flag; _loop lo atiende en el hilo de Tk.
+        # ponytail: atajo fijo. Si otra app lo tiene tomado, no hay atajo (queda en el log);
+        # hacerlo configurable cuando alguien lo pida."""
+        u = ctypes.windll.user32
+        if not u.RegisterHotKey(None, 1, HOTKEY[0], HOTKEY[1]):
+            return log.warning("el atajo global ya lo usa otra app")
+        msg = wintypes.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == 0x0312:                           # WM_HOTKEY
+                self._hot = True
+
+    # --- tooltips ---
+    def _tip_at(self, x, y):
+        """Qué control hay bajo (x, y). Por coordenadas y no por <Enter> en los items: grabando,
+        _draw() los borra y recrea cada 500 ms y el tooltip parpadearía."""
+        if self._dragging:
+            return None
+        if abs(x - self.REC) <= self.RECR:
+            return "rec"
+        if 14 <= y <= 40:
+            for tag in ("mic", "shot", "pause", "note", "gear", "expand", "quit"):
+                if abs(x - getattr(self, tag.upper())) <= self.HALO:
+                    return tag
+        if self.recording and self.LVL - 3 <= x <= self.LVL + 8:
+            return "lvl"
+        return None
+
+    def _motion(self, e):
+        self._set_tip(self._tip_at(e.x, e.y))
+
+    def _set_tip(self, tag):
+        """Cambia el tooltip pendiente o visible. Aparece a los 600 ms de quedarse encima."""
+        if tag == self._tip_tag:
+            return
+        if self._tip_job:
+            self.root.after_cancel(self._tip_job)
+        if self._tip:
+            self._tip.destroy()
+        self._tip = self._tip_job = None
+        self._tip_tag = tag
+        if tag:
+            self._tip_job = self.root.after(600, self._show_tip)
+
+    def _show_tip(self):
+        tk, p, tag = self.tk, self._pal, self._tip_tag
+        self._tip_job = None
+        w = self._tip = tk.Toplevel(self.root)
+        w.overrideredirect(True)
+        w.attributes("-topmost", True)
+        tk.Label(w, text=TIPS[tag], bg=p["ink"], fg=p["pill"], font=("Segoe UI", 8),
+                 padx=6, pady=2).pack()
+        w.update_idletasks()
+        x = self.root.winfo_x() + getattr(self, tag.upper()) - w.winfo_reqwidth() // 2
+        w.geometry(f"+{max(0, x)}+{max(0, self.root.winfo_y() - w.winfo_reqheight() - 4)}")
 
     # --- botones ---
     def _btn(self, tag, fn):
@@ -1397,6 +1809,7 @@ class Widget:
         self.c.tag_bind(tag, "<Button-1>", lambda e: self._hit(tag, fn))
 
     def _hit(self, tag, fn):
+        self._set_tip(None)
         if tag in self.NEEDS_REC and not self.recording:
             # el botón está dibujado pero apagado: decir por qué es mejor que no pasar nada
             return self._flash("dale grabar primero")
@@ -1487,10 +1900,28 @@ class Widget:
     def _muted(self):
         return bool(self.rec and self.rec.mute_evt.is_set())
 
+    def _levels(self):
+        """(micro, PC): ¿el último bloque de cada canal tuvo voz? Las barritas junto al reloj."""
+        r = self.rec if self.recording else None
+        return (bool(r and r.mic_level > VOICE and not r.mute_evt.is_set()),
+                bool(r and r.loop_level > VOICE))
+
+    def _no_signal(self):
+        """Aviso en vivo de canal mudo: NOSIGNAL s grabando sin UN bloque con voz desde el
+        arranque. Antes esto se sabía al terminar, con la reunión ya perdida."""
+        r = self.rec
+        if not (self.recording and r) or self.pause_t0 or time.time() - self.t0 < NOSIGNAL:
+            return ""
+        if not r.loop_voice:
+            return "sin audio de la PC"
+        if not r.mic_voice and not r.mic_off:
+            return "micrófono sin señal"
+        return ""
+
     def _state(self):
         """Lo que se ve. Si dos valores iguales, no hace falta repintar (lo mira _loop)."""
         return (self.recording, self.label, self.idle, self._pal is DARK, self._pressed,
-                bool(self.pause_t0), self.jobs, self._muted())
+                bool(self.pause_t0), self.jobs, self._muted(), self._levels(), self._no_signal())
 
     def _draw(self):
         c, p = self.c, self._pal
@@ -1507,19 +1938,24 @@ class Widget:
         # El estado va en una segunda línea debajo del reloj (al lado le quedaban 47 px y
         # "transcribiendo 2" no entraba). Cuando NO hay estado —lo normal— el reloj se centra
         # con los botones en vez de quedarse flotando arriba con un hueco vacío abajo.
+        mudo = self._no_signal()
         sub = ("¿seguir grabando?" if self.idle == "warn" else
                "en pausa" if self.pause_t0 else
-               self.label or (f"transcribiendo {self.jobs}" if self.jobs else ""))
+               self.label or mudo or (f"transcribiendo {self.jobs}" if self.jobs else ""))
         cy = 20 if sub else 27
         c.create_oval(self.DOT - 4, cy - 4, self.DOT + 4, cy + 4, fill=dot, outline="",
                       tags="drag")
         c.create_text(self.CLOCK, cy, anchor="w", text=self._fmt(),
                       font=("Segoe UI", 12, "bold"), fill=p["ink"], tags="drag")
+        if self.recording:            # nivel en vivo: micro y PC, verdes cuando entra voz
+            for dx, on in zip((0, 5), self._levels()):
+                c.create_rectangle(self.LVL + dx, cy - 6, self.LVL + dx + 3, cy + 6,
+                                   fill="#34c759" if on else p["edge"], outline="", tags="drag")
         if sub:                       # 46..149 de ancho: el halo del micro arranca en 149
             warn = self.idle == "warn"
             c.create_text(self.CLOCK, 38, anchor="w", text=sub,
                           font=("Segoe UI", 9 if warn else 8, "bold" if warn else "normal"),
-                          fill=p["warn"] if warn else p["dim"],
+                          fill=p["warn"] if warn or sub == mudo else p["dim"],
                           tags="keep" if warn else "drag")
         press = 1.35 if p is DARK else 0.75          # apretado: aclarar en oscuro, oscurecer en claro
 
@@ -1643,10 +2079,8 @@ class Widget:
     def _auto_retry(self):
         """Sesiones que fallaron por red: se reintentan solas cuando la red vuelve. Corre en
         el widget, que es el proceso que siempre está vivo; el botón Reintentar de la ventana
-        sigue estando para forzarlo (y para cuando se agotaron los AUTO_RETRIES).
-        # ponytail: si justo apretás Reintentar en el mismo segundo, los dos arrancan y el
-        # último que termina pisa al otro con el mismo resultado. Vale un lock por sesión si
-        # alguna vez molesta."""
+        sigue estando para forzarlo (y para cuando se agotaron los AUTO_RETRIES). Los dos
+        reclaman con claim(): el que llega segundo ve la sesión ya 'pending' y no arranca."""
         while True:
             time.sleep(AUTO_RETRY)
             try:
@@ -1654,8 +2088,7 @@ class Widget:
                 if not sids or not net_up():
                     continue
                 for sid in sids:
-                    # claim: pasa a pending para que un Reintentar manual no arranque otra
-                    if _patch(sid, status="pending", pid=os.getpid(), error=None):
+                    if claim(sid):
                         log.info("reintento automático de %s", sid)
                         self.jobs += 1        # el pill lo cuenta igual que una recién grabada
                         try:
@@ -1747,6 +2180,9 @@ class Widget:
         # mover el pill mientras grababa (parado no se repinta y por eso ahí sí andaba).
         if self._dragging:
             return self.root.after(500, self._loop)
+        if self._hot:                 # el atajo global, atendido acá: Tk solo desde su hilo
+            self._hot = False
+            self.toggle()
         if self.recording and self.rec:
             # en pausa nadie habla por definición: no dispara el aviso ni el auto-stop
             self.idle = "" if self.pause_t0 else idle_state(time.time() - self.rec.last_sound)
@@ -1829,21 +2265,27 @@ class Api:
         if chat_model is not None:
             st["chat_model"] = chat_model
         elegido = (st.get("chat_model") or "").strip()
+        g = gemini_key or st.get("gemini_key")
+        # Sin Gemini, el modelo elegido es de Groq y es el que hay que probar: la UI promete
+        # que Probar valida que exista. Con Gemini, a Groq le toca el suyo por defecto (relevo).
+        gm = CHAT if g else (elegido or CHAT)
         c = Groq(api_key=(key or st.get("key")), max_retries=0)
-        for _ in range(2):        # el segundo intento va con el relevo si el modelo ya no existe
+        for _ in range(2):        # el segundo intento va con el relevo si CHAT ya no existe
             try:
-                c.chat.completions.create(model=CHAT, max_tokens=1,
+                c.chat.completions.create(model=gm, max_tokens=1,
                                           messages=[{"role": "user", "content": "hi"}])
                 break
             except Exception as e:
-                if getattr(e, "status_code", None) == 404 and switch_chat(c):
+                # solo se salta de modelo si el que falta es el nuestro: si falta el que eligió
+                # el usuario, eso es justo lo que Probar tiene que decirle
+                if getattr(e, "status_code", None) == 404 and gm == CHAT and switch_chat(c):
+                    gm = CHAT
                     continue
-                return {"ok": False, "msg": "Groq: " + str(e)[:150]}
+                return {"ok": False, "msg": f"Groq ({gm}): " + humano(e)[:150]}
         # La de Gemini se prueba aparte porque es la que va a resumir: si está mal, el error no
         # aparecería hasta terminar una reunión entera.
-        g = gemini_key or st.get("gemini_key")
         if not g:
-            return {"ok": True, "msg": f"Groq válida ✓ resume {elegido or CHAT}"}
+            return {"ok": True, "msg": f"Groq válida ✓ resume {gm}"}
         m = elegido or GEMINI_CHAT
         try:
             from openai import OpenAI
@@ -1851,17 +2293,60 @@ class Api:
                 model=m, max_completion_tokens=1,
                 messages=[{"role": "user", "content": "hi"}])
         except Exception as e:
-            return {"ok": False, "msg": f"Gemini ({m}): " + str(e)[:130]}
+            return {"ok": False, "msg": f"Gemini ({m}): " + humano(e)[:130]}
         return {"ok": True, "msg": f"Las dos válidas ✓ resume {m}, Groq de respaldo"}
+
+    def __init__(self):
+        self._cache = {}          # archivo -> (mtime, _slim(sesión)), ver list_sessions
+
+    @staticmethod
+    def _slim(s):
+        """Lo que la lista necesita de una sesión, sin la transcripción de 70k chars."""
+        d = {k: s.get(k) for k in ("id", "name", "date", "time", "dur", "status", "stage",
+                                   "fav", "pid", "sum_error")}
+        d["summary"], d["transcript"] = bool(s.get("summary")), bool(s.get("transcript"))
+        return d
 
     def _meta(self, s):
         s = _view(s)
         m = {k: s.get(k) for k in ("id", "name", "date", "time", "dur", "status", "stage")}
         m["fav"] = bool(s.get("fav"))
+        # sin acta: falló el resumen. La lista lo marca con un punto, antes solo se veía al abrirla
+        m["nosum"] = bool(s.get("sum_error")) or (s.get("status") == "done" and not s.get("stage")
+                                                  and bool(s.get("transcript"))
+                                                  and not s.get("summary"))
         return m
 
     def list_sessions(self):
-        return sorted((self._meta(s) for s in iter_sessions()), key=lambda x: x["id"], reverse=True)
+        """Solo relee los JSON cuyo mtime cambió (misma idea que sync_index). Durante una
+        transcripción cada _patch cambia el mtime de notas/ y esto parseaba TODOS los JSON
+        completos cada 2,5 s: ~4 MB por tick con 40 sesiones, 20 MB con 200. _view se aplica
+        igual en cada llamada: que el proceso dueño muera no cambia el archivo."""
+        out, seen = [], set()
+        for f in (os.listdir(NOTAS) if os.path.isdir(NOTAS) else []):
+            if not f.endswith(".json"):
+                continue
+            p = os.path.join(NOTAS, f)
+            try:          # con el tamaño: dos escrituras en el mismo tick del reloj de archivos
+                st = os.stat(p)
+                mt = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                continue
+            seen.add(f)
+            hit = self._cache.get(f)
+            if not hit or hit[0] != mt:
+                try:
+                    s = load_json(p)
+                except Exception:
+                    log.warning("sesión ilegible: %s", f, exc_info=True)
+                    continue
+                # un .json cualquiera en notas/ no puede tumbar la lista
+                hit = self._cache[f] = (mt, self._slim(s) if s.get("id") else None)
+            if hit[1]:
+                out.append(self._meta(hit[1]))
+        for f in set(self._cache) - seen:
+            del self._cache[f]
+        return sorted(out, key=lambda x: x["id"], reverse=True)
 
     def _hits(self, rows):
         """[(sid, fragmento)] -> metadatos para la lista. Ya vienen por relevancia (rank)."""
@@ -1891,7 +2376,7 @@ class Api:
             terms = expand_query(self._chat(), q)
         except Exception as e:
             log.warning("sin sinónimos", exc_info=True)
-            return {"terms": [], "hits": [], "msg": str(e)[:120]}
+            return {"terms": [], "hits": [], "msg": humano(e)[:120]}
         return {"terms": terms, "hits": self._hits(related_index(terms, set(seen)))}
 
     def _paths(self, sid):
@@ -1986,40 +2471,114 @@ class Api:
             os.startfile(p)
         return {"ok": True}
 
+    # Todo lo que escribe pasa por _patch: leer-modificar-escribir con load/store completos
+    # pisaba lo que el widget guardara en el medio (el patch final de una transcripción).
     def save_notes(self, sid, notes):
-        s = load_session(sid); s["notes"] = notes; store_session(s); return {"ok": True}
+        return {"ok": bool(_patch(sid, notes=notes))}
 
     def toggle_fav(self, sid):
-        s = load_session(sid)
-        s["fav"] = not s.get("fav")
-        store_session(s)
-        return {"ok": True, "fav": s["fav"]}
+        s = _patch(sid, lambda s: s.update(fav=not s.get("fav")))
+        return {"ok": bool(s), "fav": bool(s and s.get("fav"))}
 
     def rename_session(self, sid, name):
+        n = clean_name(name)
+        s = _patch(sid, name=n) if n else load_session(sid)
+        return {"ok": bool(s), "name": (s or {}).get("name", "")}
+
+    def rename_speaker(self, sid, old, new):
+        """«Los demás» -> «Acme» en esta sesión: en los turnos y en el texto plano, que es lo
+        que va al modelo, así que el acta siguiente ya sale con el nombre real."""
+        new = speaker_label(new)
+        if not (old and new) or new == old:
+            return {"ok": False}
+
+        def fn(s):
+            for t in s.get("turns") or []:
+                if t.get("who") == old:
+                    t["who"] = new
+            s["transcript"] = re.sub(r"(^|\n\n)" + re.escape(old) + ": ",
+                                     lambda m: m.group(1) + new + ": ", s.get("transcript") or "")
+        return {"ok": bool(_patch(sid, fn)), "who": new}
+
+    def toggle_done(self, sid, i):
+        """Tilde de una acción del acta. Se guarda el índice del bullet en s["done"] y el texto
+        del acta no se toca (ver acciones())."""
+        def fn(s):
+            s["done"] = sorted(set(s.get("done") or []) ^ {int(i)})
+        s = _patch(sid, fn)
+        return {"ok": bool(s), "done": (s or {}).get("done", [])}
+
+    def pending(self):
+        """Las acciones sin tildar de todas las sesiones, para la vista Pendientes. Lee todos
+        los JSON, pero solo cuando se abre esa vista."""
+        out = []
+        for s in iter_sessions():
+            done = set(s.get("done") or [])
+            out += [{"sid": s["id"], "name": s.get("name") or "Sesión", "date": s.get("date"),
+                     "i": i, "who": who, "text": text}
+                    for i, who, text in acciones(s.get("summary")) if i not in done]
+        return sorted(out, key=lambda x: x["sid"], reverse=True)
+
+    def export_md(self, sid):
+        """notas/<id>.md con todo lo que se pega en un mail o en Notion."""
         s = load_session(sid)
-        s["name"] = clean_name(name) or s["name"]
-        store_session(s)
-        return {"ok": True, "name": s["name"]}
+        out = [f"# {s.get('name') or 'Sesión'}",
+               f"{s.get('date', '')} · {s.get('time', '')} · {round((s.get('dur') or 0) / 60)} min"]
+        for title, k in (("Acta", "summary"), ("Minuta", "minuta"), ("Notas", "notes"),
+                         ("Transcripción", "transcript")):
+            if (s.get(k) or "").strip():
+                out += [f"## {title}", s[k].strip()]
+        p = os.path.join(NOTAS, f"{sid}.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(out) + "\n")
+        return {"ok": True, "path": p}
+
+    def test_audio(self, secs=5):
+        """¿Entra audio por los dos canales? Unos segundos de cada uno, sin guardar nada: el
+        aviso de canal mudo llega al terminar la reunión, y esto lo adelanta a antes de grabar."""
+        import soundcard as sc
+        devs = {"mic": sc.default_microphone(),
+                "loop": sc.get_microphone(id=str(sc.default_speaker().name),
+                                          include_loopback=True)}
+        out = {}
+
+        def cap(k):
+            try:
+                with devs[k].recorder(samplerate=SR, channels=1, blocksize=BLOCK) as r:
+                    lv = max(rms(r.record(numframes=BLOCK)) for _ in range(SR * secs // BLOCK))
+                out[k] = {"level": round(lv, 4), "ok": lv > VOICE}
+            except Exception as e:
+                log.warning("prueba de audio %s", k, exc_info=True)
+                out[k] = {"level": 0, "ok": False, "msg": str(e)[:120]}
+        ts = [threading.Thread(target=cap, args=(k,)) for k in devs]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        return out
 
     def delete_session(self, sid):
-        for p in [spath(sid), os.path.join(NOTAS, f"{sid}.wav"),
+        # Primero el JSON, que ES la sesión: si no se pudo borrar, no se toca nada más y se dice.
+        # Antes el error se tragaba y la UI decía "eliminada" con la sesión todavía en disco.
+        if not remove_session(sid):
+            return {"ok": False, "msg": "No se pudo eliminar: el archivo está en uso. "
+                                        "Prueba de nuevo en unos segundos."}
+        for p in [os.path.join(NOTAS, f"{sid}.wav"), os.path.join(NOTAS, f"{sid}.md"),
                   chan_path(sid, "mic"), chan_path(sid, "loop")] + shots(sid):
             try:
                 os.remove(p)
-            except OSError:               # no existe, o el widget lo tiene abierto
-                pass
+            except OSError:   # no existe, o lo está leyendo la transcripción: esa los borra al
+                pass          # terminar, porque su _patch final ve que la sesión ya no está
         drop_from_index(sid)
         return {"ok": True}
 
     def retry_transcription(self, sid):
-        s = load_session(sid)
-        if s.get("status") == "pending" and not _stale(s):
-            return {"ok": False, "msg": "Ya se está transcribiendo."}
         if not (os.path.exists(chan_path(sid, "mic")) or os.path.exists(chan_path(sid, "loop"))):
             return {"ok": False, "msg": "El audio ya no está disponible."}
-        s["status"] = "pending"; s["pid"] = os.getpid()   # dueño del reintento
-        s["retries"] = 0        # pedido a mano: vuelve a tener todos los automáticos
-        s.pop("error", None); store_session(s)
+        # pedido a mano: vuelve a tener todos los automáticos
+        if not claim(sid, manual=True):
+            return {"ok": False, "msg": "Ya se está transcribiendo." if os.path.exists(spath(sid))
+                    else "La sesión ya no está."}
         threading.Thread(target=do_transcription, args=(sid,), daemon=True).start()
         return {"ok": True}
 
@@ -2036,19 +2595,17 @@ class Api:
         if not _patch(sid, pid=os.getpid(), stage="Sincronizando…"):
             return {"ok": False, "msg": "La sesión ya no está."}
         try:
-            raw = read_wav(wav)
-            samples = cleanup(raw)
-            total, cnt = n_chunks(samples), [0]
+            total, cnt = n_chunks(wav_frames(wav)), [0]
 
             def done():
                 cnt[0] += 1
                 set_stage(sid, f"Sincronizando… {cnt[0]}/{total}")
 
-            segs = transcribe_channel(self._client(), samples, "", done, raw)
+            segs = transcribe_channel(self._client(), wav_chunks([wav]), "", done)
         except Exception as e:
             log.exception("sincronizar %s", sid)
             _patch(sid, stage=None)
-            return {"ok": False, "msg": str(e)[:200]}
+            return {"ok": False, "msg": humano(e)}
         _patch(sid, turns=dialog_turns(segs), transcript=format_dialog(segs), stage=None)
         return {"ok": True}
 
@@ -2060,20 +2617,46 @@ class Api:
         _patch(sid, pid=os.getpid())       # el dueño del trabajo en curso es este proceso
         try:
             text = summarize_text(self._chat(), s.get("notes", ""), s.get("transcript", ""),
-                                  lambda i, n: set_stage(sid, f"Resumiendo… {i}/{n}"))
+                                  lambda i, n: set_stage(sid, f"Resumiendo… {i}/{n}"), cuando(s))
         except Exception as e:
             log.exception("resumen de %s", sid)
-            _patch(sid, stage=None, sum_error=str(e)[:200])
-            return {"ok": False, "msg": str(e)[:200]}
-        _patch(sid, summary=text, stage=None, sum_error=None)
-        return {"ok": True, "summary": text}
+            _patch(sid, stage=None, sum_error=humano(e))
+            return {"ok": False, "msg": humano(e)}
+        s = store_summary(sid, text) or {}
+        return {"ok": True, "summary": s.get("summary", ""), "name": s.get("name", "")}
+
+    def minuta(self, sid):
+        """La minuta formal para enviar. A mano y no automática: se pide cuando se va a mandar,
+        y así no gasta cuota en reuniones donde no hace falta. Sale del acta: sin acta, primero
+        el acta."""
+        s = load_session(sid)
+        if not s.get("summary"):
+            r = self.summarize(sid)
+            if not r["ok"]:
+                return r
+            s = load_session(sid)
+        _patch(sid, pid=os.getpid(), stage="Redactando minuta…")
+        try:
+            text = minuta_text(self._chat(), s)
+        except Exception as e:
+            log.exception("minuta de %s", sid)
+            _patch(sid, stage=None, min_error=humano(e))
+            return {"ok": False, "msg": humano(e)}
+        _patch(sid, minuta=text, stage=None, min_error=None)
+        return {"ok": True, "minuta": text}
 
     def ask(self, sid, q):
         s = load_session(sid)
         if not s.get("transcript"):
             return {"ok": False, "msg": "Esta sesión no tiene transcripción."}
-        a = ask_text(self._chat(), s["transcript"], q)
-        _patch(sid, chat=(s.get("chat") or []) + [{"q": q, "a": a}])
+        try:
+            a = ask_text(self._chat(), s["transcript"], q)
+        except Exception as e:
+            log.exception("chat de %s", sid)
+            return {"ok": False, "msg": humano(e)}
+        # la lista se relee dentro del lock: la leída ANTES de la llamada al LLM perdía la
+        # respuesta de otra pregunta que terminara en el medio
+        _patch(sid, lambda s: s.update(chat=(s.get("chat") or []) + [{"q": q, "a": a}]))
         return {"ok": True, "a": a}
 
 
@@ -2106,6 +2689,7 @@ def window_main():
     global MEDIA_BASE
     h = take_lock()           # dos procesos --window pueden llegar aquí; solo uno gana el mutex
     if not h:
+        focus_window()        # ya estaba abierta (acceso del menú Inicio): traerla al frente
         return
     set_dpi_aware()
     try:
@@ -2174,8 +2758,8 @@ def selftest():
     assert byte_range("bytes=abc", 100) == (0, 99, False)     # basura: el archivo entero
     assert byte_range("bytes=0-0", 100) == (0, 0, True)       # un solo byte, es válido
     assert byte_range("bytes=0-99", 0) == (0, 0, False)       # archivo vacío
-    assert n_chunks(np.zeros(0, "float32")) == 1                  # el total del progreso
-    assert n_chunks(np.zeros(SR * CHUNK_SECS + 1, "float32")) == 2
+    assert n_chunks(0) == 1                                       # el total del progreso
+    assert n_chunks(SR * CHUNK_SECS + 1) == 2
 
     # eco: el micro captó los parlantes, así que la misma frase salió en los dos canales
     segs = [(0.0, "Yo", "esperemos que nos lo resuelvan pronto porque están amarradas"),
@@ -2484,13 +3068,233 @@ def selftest():
     assert not os.path.exists(spath("s1"))
     assert search_index("presupuesto") == []
 
+    # --- integridad: dos procesos sobre el mismo JSON ---
+    # 1.1: con el archivo abierto por otro (la ventana leyendo), os.replace da WinError 5
+    import threading as th
+    abierto = th.Event()
+
+    def lector_de(sid):
+        def lector():
+            abierto.clear()
+            with open(spath(sid), encoding="utf-8"):
+                abierto.set(); time.sleep(0.1)
+        return lector
+    t = th.Thread(target=lector_de("s2")); t.start(); abierto.wait()
+    store_session(load_session("s2"))               # sin _replace esto revienta
+    t.join()
+    # 1.2: dos escritores sobre la misma sesión: no se pisan
+    store_session({"id": "s8", "notes": "", "n": 0})
+
+    def spam():
+        for i in range(200):
+            _patch("s8", n=i + 1)
+    t = th.Thread(target=spam); t.start()
+    for i in range(50):
+        api.save_notes("s8", f"nota {i}")
+    t.join()
+    s8 = load_session("s8")
+    assert s8["n"] == 200 and s8["notes"] == "nota 49", s8
+    os.remove(spath("s8"))
+
+    # claim: comprobar y reclamar en el mismo lock. Dos reintentos a la vez -> uno solo arranca
+    store_session({"id": "s12", "status": "error", "retries": 0})
+    ganadores = []
+    hilos = [th.Thread(target=lambda m=m: ganadores.append(bool(claim("s12", manual=m))))
+             for m in (False, True, False, True)]
+    for t in hilos:
+        t.start()
+    for t in hilos:
+        t.join()
+    assert sorted(ganadores) == [False, False, False, True], ganadores
+    assert load_session("s12")["status"] == "pending"
+    _patch("s12", status="error", retries=AUTO_RETRIES)
+    assert not claim("s12"), "sin intentos automáticos no lo toma el barrido"
+    assert claim("s12", manual=True)["retries"] == 0, "a mano sí, y devuelve los intentos"
+    assert _patch("s12", lambda s: False) is None and load_session("s12")["status"] == "pending"
+    # borrar va bajo el mismo lock; con el JSON abierto por otro, reintenta en vez de fallar
+    t = th.Thread(target=lector_de("s12")); t.start(); abierto.wait()
+    assert remove_session("s12") and not os.path.exists(spath("s12"))
+    t.join()
+    assert remove_session("s12"), "ya borrada: no es un error"
+    assert claim("s12") is None and _patch("s12", x=1) is None, "y nada la resucita"
+
+    # 3.2: sin DPAPI la key va en claro, y leer no puede reescribir settings.json cada vez
+    prot, guardar, n = _protect, save_settings, []
+    globals()["_protect"] = lambda t: 1 / 0
+    save_settings({"key": "gsk_plano", "theme": "light", "keep_audio": True,
+                   "label_speakers": False})
+    globals()["save_settings"] = lambda d: n.append(1)
+    assert load_settings()["key"] == "gsk_plano" and n == [], "bucle de escritura"
+    globals()["_protect"], globals()["save_settings"] = prot, guardar
+    save_settings({"key": "gsk_x", "theme": "light", "keep_audio": True, "label_speakers": False})
+    assert "_plain" not in load_json(SETTINGS_PATH)
+
+    # 2.1: content None / choices vacío no pueden llegar como 'NoneType' has no attribute 'strip'
+    def fake_chat(texto, calls=None, fin="stop"):
+        def create(**kw):
+            if calls is not None:
+                calls.append(kw)
+            t = texto.pop(0) if isinstance(texto, list) else texto
+            return ns(choices=[ns(message=ns(content=t), finish_reason=fin)])
+        return ns(chat=ns(completions=ns(create=create)))
+    assert "cortado" in chat(fake_chat(None, fin="length"), "s", "u")
+    for vacio in (fake_chat(None), ns(chat=ns(completions=ns(create=lambda **k: ns(choices=[]))))):
+        try:
+            chat(vacio, "s", "u")
+            raise AssertionError("sin texto tiene que fallar, así entra el relevo")
+        except RuntimeError:
+            pass
+    # 2.4: el error como lo lee una persona
+    e401 = Exception("x"); e401.status_code = 401
+    assert "inválida" in humano(e401) and "Cuota del día" in humano(tpd)
+    assert "minuto" in humano(minuto) and humano(Exception("raro")) == "raro"
+    assert "Sin conexión" in humano(type("APIConnectionError", (Exception,), {})())
+
+    # 7.2 y 6.3: los tramos ven las notas y quién es quién hasta ahora, piden menos salida y
+    # piensan en low; el acta recibe la fecha
+    calls = []
+    fc = fake_chat(["PERSONAS: Eric = \"yo los convoqué\"\n- DECIDIDO x",
+                    "PERSONAS: Ana = \"nuestro local\"\n- y", "TÍTULO: T\n\nacta"], calls)
+    fc.trozo, fc.tramo_out, fc.modelo = 30, TRAMO_OUT, CHAT
+    assert _summarize(fc, "ver la fecha", "a" * 25 + "\n\n" + "b" * 25, None, "30/09/2026 10:15")
+    tramo1, tramo2, final = (c["messages"][1]["content"] for c in calls)
+    assert "NOTAS del usuario:\nver la fecha" in tramo1 and "HASTA AHORA" not in tramo1
+    assert "HASTA AHORA" in tramo2 and "yo los convoqué" in tramo2
+    assert calls[0]["max_completion_tokens"] == TRAMO_OUT and calls[-1]["max_completion_tokens"] == CHAT_OUT
+    assert calls[0]["extra_body"] == {"reasoning_effort": "low"} and calls[-1]["extra_body"] is None
+    assert final.startswith("FECHA DE LA REUNIÓN: 30/09/2026") and calls[0]["temperature"] == TEMP
+    # el título viene en la primera línea del acta: un request menos
+    assert split_title("TÍTULO: Junta de ventas\n\nQUIÉNES\n- x") == ("Junta de ventas", "QUIÉNES\n- x")
+    assert split_title('**Título:** "Plan Q3".\nDECIDIDO') == ("Plan Q3", "DECIDIDO")
+    assert split_title("QUIÉNES\n- x") == ("", "QUIÉNES\n- x")
+    store_session({"id": "s10", "name": ""})
+    store_summary("s10", "TÍTULO: Nuevo\n\nacta")
+    assert (load_session("s10")["name"], load_session("s10")["summary"]) == ("Nuevo", "acta")
+    _patch("s10", done=[1])
+    store_summary("s10", "TÍTULO: Otro\n\nacta2")
+    s10 = load_session("s10")
+    assert s10["name"] == "Nuevo", "no pisa el nombre que ya tenía"
+    assert "done" not in s10, "los tildes eran de otra acta"
+    assert cuando({"id": "20260930_101500"}) == "30/09/2026 10:15 (miércoles)"
+
+    # 4.7: las acciones del acta, contadas igual que md() en la ventana
+    acta = ("QUIÉNES\n- Eric, convoca\nACCIONES\n**Eric**\n- mandar la **propuesta**\n"
+            "- llamar a Ana\n**SIN DUEÑO - ASIGNAR**\n- definir fecha\nMENCIONADO\n- nada")
+    assert acciones(acta) == [(0, "Eric", "mandar la propuesta"), (1, "Eric", "llamar a Ana"),
+                              (2, "SIN DUEÑO - ASIGNAR", "definir fecha")], acciones(acta)
+    assert acciones("### Acciones\n1. uno") == [(0, "", "uno")] and acciones(None) == []
+    _patch("s10", summary=acta, name="Con acciones")
+    assert api.toggle_done("s10", 1)["done"] == [1]
+    assert [x["text"] for x in api.pending() if x["sid"] == "s10"] == ["mandar la propuesta",
+                                                                        "definir fecha"]
+    assert api.toggle_done("s10", 1)["done"] == []
+
+    # 4.9: "Los demás" -> "Acme" solo en la etiqueta, nunca dentro de lo que se dijo
+    store_session({"id": "s9", "turns": [{"t": 0, "who": "Los demás", "text": "hola"},
+                                         {"t": 1, "who": "Yo", "text": "Los demás: no"}],
+                   "transcript": "Los demás: hola\n\nYo: Los demás: no"})
+    assert api.rename_speaker("s9", "Los demás", " Acme: SA ")["who"] == "Acme SA"
+    s9 = load_session("s9")
+    assert [t["who"] for t in s9["turns"]] == ["Acme SA", "Yo"]
+    assert s9["transcript"] == "Acme SA: hola\n\nYo: Los demás: no", s9["transcript"]
+    assert not api.rename_speaker("s9", "Yo", "  ")["ok"]
+
+    # 7.3: la minuta sale del acta en un request y se guarda aparte
+    _patch("s9", summary="DECIDIDO\n- x", name="Junta", dur=1800)
+    calls = []
+    api._chat = lambda: fake_chat("MINUTA DE REUNIÓN\n\nASISTENTES\n- Eric", calls)
+    r = api.minuta("s9")
+    s9 = load_session("s9")
+    assert r["ok"] and s9["minuta"].startswith("MINUTA DE REUNIÓN") and "stage" not in s9
+    assert "ACTA:\nDECIDIDO" in calls[0]["messages"][1]["content"] and len(calls) == 1
+    assert "(Duración: 30 min)" in calls[0]["messages"][1]["content"]
+    api._chat = lambda: fake_chat(None)                  # falla: se reporta, no se traga
+    assert not api.minuta("s9")["ok"] and load_session("s9")["min_error"]
+    del api._chat
+    # 4.2: el acta sale de la app
+    md_path = api.export_md("s9")["path"]
+    assert md_path == os.path.join(NOTAS, "s9.md")
+    txt = open(md_path, encoding="utf-8").read()
+    assert txt.startswith("# Junta") and "## Minuta" in txt and "## Transcripción" in txt
+    api.delete_session("s9")
+    assert not os.path.exists(md_path), "borrar la sesión se lleva el .md"
+
+    # 6.5: la lista cachea por archivo y relee solo el que cambió
+    api2 = Api()
+    antes = {m["id"]: m["name"] for m in api2.list_sessions()}
+    _patch("s2", name="Renombrada desde el otro proceso")
+    assert {m["id"]: m["name"] for m in api2.list_sessions()}["s2"] != antes["s2"]
+    store_session({"id": "s11", "status": "done", "transcript": "x", "sum_error": "429"})
+    assert [m["nosum"] for m in api2.list_sessions() if m["id"] == "s11"] == [True]
+    os.remove(spath("s11"))
+    assert "s11" not in [m["id"] for m in api2.list_sessions()]
+
+    # 6.1: el audio se lee de a trozos; 25 min = 3 trozos con su tiempo base, y el .wav de
+    # auditoría se mezcla en streaming con la duración del canal más largo
+    tono = (0.3 * np.sin(2 * np.pi * 220 * np.arange(SR * 60) / SR)).astype("float32")
+    largo, corto, mezcla = (os.path.join(NOTAS, f) for f in ("_l.wav", "_c.wav", "_m.wav"))
+    for path, mins in ((largo, 25), (corto, 12)):
+        w_ = _open_wav(path)
+        for _ in range(mins):
+            w_.writeframes(_to_i16(tono))
+        w_.close()
+    subidas, prog = [], []
+    fw = ns(audio=ns(transcriptions=ns(create=lambda **k: subidas.append(1) or
+                                        {"segments": [{"start": 1.0, "end": 2.0, "text": "hola"}]})))
+    segs = transcribe_channel(fw, wav_chunks([largo]), "Yo", lambda: prog.append(1))
+    assert len(subidas) == 3 and len(prog) == 3 == n_chunks(wav_frames(largo))
+    assert [x[0] for x in segs] == [1.0, 601.0, 1201.0], segs
+    write_mix(mezcla, [largo, corto])
+    assert wav_frames(mezcla) == SR * 60 * 25
+    for f in (largo, corto, mezcla):
+        os.remove(f)
+    # 6.2: un trozo mudo no se sube (cuota y alucinaciones), pero el progreso avanza igual
+    subidas.clear(); prog.clear()
+    assert transcribe_channel(fw, iter([np.zeros(SR * 30, "float32")]), "Yo",
+                              lambda: prog.append(1)) == []
+    assert subidas == [] and prog == [1]
+
+    # de punta a punta con un Groq de mentira: la transcripción se guarda ANTES de tocar los
+    # canales, el título sale del acta, y el .wav se escribe al final
+    groq_real, env_real = Groq, _env_key
+    globals()["_env_key"] = lambda name: ""              # que un GEMINI_API_KEY real no se cuele
+    borrar = []
+
+    def whisper(**k):
+        for x in borrar:
+            os.remove(spath(x))                           # la borran mientras se transcribe
+        return {"segments": [{"start": 0.5, "end": 2.0, "text": "hola equipo"}]}
+    fg = ns(audio=ns(transcriptions=ns(create=whisper)), chat=fake_chat("TÍTULO: Junta de prueba"
+                                                                        "\n\nDECIDIDO\n- algo").chat)
+    globals()["Groq"] = lambda **kw: fg
+    for sid, quitar in (("20260930_101500", False), ("20260930_111500", True)):
+        store_session({"id": sid, "name": "", "status": "pending", "notes": "", "dur": 3})
+        for ch in ("mic", "loop"):
+            write_mono(chan_path(sid, ch), tono[:SR * 3])
+        borrar[:] = [sid] if quitar else []
+        do_transcription(sid)
+        assert not any(os.path.exists(chan_path(sid, ch)) for ch in ("mic", "loop"))
+        if quitar:                                        # 1.3: ni sesión resucitada ni .wav huérfano
+            assert not os.path.exists(spath(sid))
+            assert not os.path.exists(os.path.join(NOTAS, f"{sid}.wav"))
+            continue
+        s_ = load_session(sid)
+        assert s_["status"] == "done" and "stage" not in s_, s_
+        assert s_["name"] == "Junta de prueba" and s_["summary"] == "DECIDIDO\n- algo"
+        assert "hola equipo" in s_["transcript"]
+        assert wav_frames(os.path.join(NOTAS, f"{sid}.wav")) == SR * 3
+        api.delete_session(sid)
+    do_transcription("noexiste")                          # 3.1: borrada antes de arrancar
+    globals()["Groq"], globals()["_env_key"] = groq_real, env_real
+
     w = Widget(); w.root.withdraw()                # oculto: sin parpadeo en pantalla
     assert w._pal is LIGHT                         # el tema sale de settings.json (light arriba)
     w.label = "captura 1 ✓"                        # mensaje efímero de una captura
-    w._loop(); assert w._shown == (False, "captura 1 ✓", "", False, None, False, 0, False)
+    w._loop(); assert w._shown == (False, "captura 1 ✓", "", False, None, False, 0, False,
+                                   (False, False), "")
     w._clear("otro"); assert w.label == "captura 1 ✓", "no pisa un mensaje más nuevo"
     w._clear("captura 1 ✓")                        # y el suyo sí lo limpia
-    w._loop(); assert w._shown == (False, "", "", False, None, False, 0, False), "debe repintar"
+    w._loop(); assert w._shown[:8] == (False, "", "", False, None, False, 0, False), "repintar"
     w.jobs = 2                                     # grabar la próxima mientras estas transcriben
     w._loop(); assert w._shown[6] == 2
     w.jobs = 0
@@ -2536,19 +3340,56 @@ def selftest():
     w._pause()                                     # reanudar: sigue donde estaba
     assert not w.pause_t0 and not w.rec.pause_evt.is_set() and w._fmt() == "00:00:05"
     assert idle_state(time.time() - w.rec.last_sound) == ""    # la pausa no cuenta como silencio
-    w.recording, w.rec = False, None
+    # nivel en vivo: la barrita del canal que tiene voz se enciende
+    w.rec.loop_level = 0.05
+    w._loop(); assert w._shown[8] == (False, True), w._shown
+    w.rec.mic_level = 0.05; w.rec.mute_evt.set()
+    w._loop(); assert w._shown[8] == (False, True), "micro cortado: su barrita no se enciende"
+    w.rec.mute_evt.clear()
+    w._loop(); assert w._shown[8] == (True, True)
+    # canal sin un solo bloque con voz tras NOSIGNAL s: se avisa en vivo, no al terminar
+    assert w._no_signal() == "", "antes de NOSIGNAL no se avisa"
+    w.t0 = time.time() - NOSIGNAL - 1
+    w._loop(); assert w._shown[9] == "sin audio de la PC"
+    w.rec.loop_voice = 1
+    assert w._no_signal() == "", "micro cortado a propósito: no es falta de señal"
+    w.rec.mic_off = False
+    assert w._no_signal() == "micrófono sin señal"
+    w.rec.mic_voice = 1
+    assert w._no_signal() == ""
+    # tooltips: por coordenadas, así que sobreviven al repintado de cada tick
+    assert w._tip_at(Widget.REC, 26) == "rec" and w._tip_at(Widget.GEAR, 27) == "gear"
+    assert w._tip_at(Widget.LVL + 2, 20) == "lvl" and w._tip_at(Widget.GRIP, 27) is None
+    assert all(hasattr(Widget, k.upper()) for k in TIPS), "cada tooltip necesita su x"
+    w._set_tip("gear"); w._show_tip()
+    assert w._tip.winfo_exists() and "Configuración" in TIPS["gear"]
+    w._set_tip(None); assert w._tip is None and w._tip_job is None
+    toggles = []                                   # el atajo global llega a toggle() en el hilo de Tk
+    w.toggle = lambda: toggles.append(1)
+    w._hot = True; w._loop()
+    assert not w._hot and toggles == [1]
+    del w.toggle
+    w.recording, w.rec, w.jobs = False, None, 0
     assert w._take_notes() == ""                   # sin bloc abierto, no hay notas
     w._open_notes(); w.notes_win.withdraw()        # el bloc alimenta la sesión y queda vacío
     w.notes_box.insert("1.0", "ojo con el gasto")
     assert w._take_notes() == "ojo con el gasto" and w._take_notes() == ""
+    # «Cerrar TakeMyNotes» manda WM_CLOSE: tiene que pasar por _quit, no destruir a lo bruto
+    assert w.root.protocol("WM_DELETE_WINDOW"), "sin protocolo, WM_CLOSE cerraría grabando"
     w.root.destroy()
     logging.disable(logging.NOTSET)
     print("selftest ok")
 
 
 if __name__ == "__main__":
+    # Accesos del menú Inicio (ver installer.iss): TakeMyNotes = el widget, --window = sesiones,
+    # --settings = Configuración, --quit = cerrar todo
     if "--selftest" in sys.argv:
         selftest()
+    elif "--quit" in sys.argv:
+        quit_all()
+    elif "--settings" in sys.argv:
+        launch_window("settings")
     else:
         win = "--window" in sys.argv
         setup_log("window" if win else "widget")
