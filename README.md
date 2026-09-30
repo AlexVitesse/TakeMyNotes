@@ -42,8 +42,10 @@ estorba y abre la ventana grande solo cuando la necesitas. Todo queda en tu disc
 ### 🎧 Captura
 - **Micro + audio del sistema** a la vez (WASAPI loopback, sin cables virtuales).
 - **Cortar tu micro** o **pausar** sin parar la grabación.
+- **Nivel de audio en vivo** por canal, y aviso si uno lleva un minuto sin señal.
 - **Capturas de pantalla** de todos los monitores, colgadas de la sesión.
 - **Notas manuales en vivo** que la IA fusiona con la transcripción.
+- **Ctrl+Shift+R** graba y detiene desde cualquier app.
 - **Aviso de inactividad**: 5 min sin voz → *¿seguir?*; 2 min más → detiene y transcribe.
 - **Grabar la siguiente** mientras la anterior se transcribe.
 
@@ -54,8 +56,10 @@ estorba y abre la ventana grande solo cuando la necesitas. Todo queda en tu disc
 - **Groq Whisper** (`whisper-large-v3-turbo`) por canal, fusionado por tiempo.
 - **"Yo" vs "Los demás"**, con tu nombre en cada turno y en ámbar cuando te mencionan.
 - **Descarta el eco** del micro y las **alucinaciones sobre el silencio** («Gracias.» cada 30 s).
-- **Sincronizada con el audio**: clic en una línea y el audio salta ahí.
-- **Progreso real**: "Transcribiendo… 3/12".
+- **Sincronizada con el audio**: clic en una línea y el audio salta ahí; tus notas con hora
+  aparecen en su minuto.
+- **Renombra a «Los demás»** por sesión («Acme») y el acta siguiente ya usa el nombre.
+- **Progreso real**: "Transcribiendo… 3/12". Reuniones de horas sin agotar la memoria.
 
 </td>
 </tr>
@@ -65,6 +69,9 @@ estorba y abre la ventana grande solo cuando la necesitas. Todo queda en tu disc
 ### ✦ Acta y chat
 - **Acta automática**: decidido, propuesto sin respuesta, descartado y por qué, ya entregado,
   preguntas abiertas y hasta 10 acciones **con dueño** (o `sin dueño`, nunca inventado).
+- **Acciones tildables** y vista **Pendientes** con las abiertas de todas las reuniones.
+- **Minuta** formal para enviar a los asistentes, a pedido.
+- **Copiar** acta o minuta, o **exportar** la sesión a `.md`.
 - **Groq** (`openai/gpt-oss-120b`) o **Gemini** (`gemini-3.7-flash`), uno de respaldo del otro.
 - **Chat** por sesión: "¿qué acordamos sobre X?".
 
@@ -75,7 +82,8 @@ estorba y abre la ventana grande solo cuando la necesitas. Todo queda en tu disc
 - **Buscador de texto completo** (SQLite FTS5): prefijos, sin acentos, fragmento resaltado,
   salta al punto exacto de la transcripción.
 - **Sugerencias por significado**: buscas "engaño", aparece "fraude".
-- **Nombre generado por la IA**, favoritos, renombrar, eliminar.
+- **Agrupada por fecha**, con aviso en las sesiones que quedaron sin acta.
+- **Nombre generado por la IA**, favoritos, renombrar, eliminar, atajos de teclado.
 - **Tema claro / oscuro / auto** y API keys **cifradas con DPAPI**.
 
 </td>
@@ -93,7 +101,7 @@ estorba y abre la ventana grande solo cuando la necesitas. Todo queda en tu disc
 | Transcripción | Groq Whisper `whisper-large-v3-turbo` |
 | Resumen / chat | Groq `openai/gpt-oss-120b` · Gemini vía endpoint compatible con OpenAI |
 | Búsqueda | SQLite FTS5 (stdlib) |
-| Empaquetado | PyInstaller → un solo `.exe` |
+| Empaquetado | PyInstaller → un solo `.exe` · Inno Setup → instalador con menú Inicio |
 
 ## 🚀 Empezar
 
@@ -105,6 +113,12 @@ estorba y abre la ventana grande solo cuando la necesitas. Todo queda en tu disc
 - Opcional, para el resumen: una **API key de Gemini** → [aistudio.google.com](https://aistudio.google.com/apikey).
 
 ### Instalación
+
+**Con el instalador** (`TakeMyNotes-Setup-<versión>.exe`, ver [Empaquetar](#empaquetar-a-exe)):
+ejecútalo, no pide permisos de administrador, y queda la carpeta **TakeMyNotes** en el menú
+Inicio.
+
+**Desde el código:**
 
 ```bash
 git clone https://github.com/AlexVitesse/TakeMyNotes.git
@@ -146,13 +160,31 @@ Genera `dist\TakeMyNotes.exe`: un solo archivo, sin consola, sin instalar Python
 PyInstaller es generado y está en `.gitignore`; `build.bat` es la única fuente de verdad de los
 flags (`--add-data ui;ui`, `--collect-all webview`).
 
+Si está instalado [Inno Setup 6](https://jrsoftware.org/isdl.php) (`winget install
+JRSoftware.InnoSetup`), `build.bat` genera además **`dist\TakeMyNotes-Setup-<versión>.exe`**
+(`installer.iss`). Instala por usuario en `%LOCALAPPDATA%\Programs\TakeMyNotes`, sin pedir
+admin, y crea la carpeta **TakeMyNotes** en el menú Inicio:
+
+| Acceso | Qué hace |
+|--------|----------|
+| **TakeMyNotes** | Muestra el widget de grabación |
+| **Sesiones** | Abre la ventana (`--window`); si ya está abierta, la trae al frente |
+| **Configuración** | Abre ⚙ directamente (`--settings`) |
+| **Cerrar TakeMyNotes** | Cierra widget y ventana (`--quit`); pregunta si estás grabando |
+| **Carpeta de notas** | Abre `notas\` en el Explorador |
+| **Desinstalar TakeMyNotes** | Quita la app; **tus notas y la configuración se quedan** |
+
+Opcionales al instalar: acceso en el escritorio y **abrir el widget al iniciar Windows**. Al
+actualizar o desinstalar, el instalador cierra la app con `--quit` antes de tocar el `.exe`.
+
 ## 🎮 Uso
 
 **Widget** (esquina inferior derecha, siempre encima, arrastrable):
 
 | Botón | Qué hace |
 |-------|----------|
-| 🔵 / 🔴 ■ | Grabar / detener (con cronómetro) |
+| 🔵 / 🔴 ■ | Grabar / detener (con cronómetro). Desde cualquier app: **Ctrl+Shift+R** |
+| ▮▮ | Nivel en vivo del micro y del audio de la PC; tras 60 s sin señal en uno, avisa en ámbar |
 | **✎** | Bloc de notas de la sesión en curso (o la próxima) |
 | 🎤 | Cortar tu micro — solo mientras grabas |
 | 📷 | Captura de pantalla a la sesión — solo mientras grabas |
@@ -165,15 +197,28 @@ se puede leer en cuanto está, sin esperar el resumen. Pestañas:
 
 | Pestaña | Contenido |
 |---------|-----------|
-| `Resumen` | El acta, con markdown renderizado |
-| `Transcripción` | Reproductor arriba, cada turno con su minuto; clic = el audio salta ahí; **⧉ Copiar** |
+| `Resumen` | El acta, con markdown renderizado; las **acciones se tildan**; **⧉ Copiar acta** |
+| `Minuta` | Documento formal para enviar (asistentes, orden del día, acuerdos con fecha), a pedido |
+| `Transcripción` | Reproductor arriba, cada turno con su minuto; clic = el audio salta ahí; las notas con hora en su minuto; clic en «Los demás» lo renombra; **⧉ Copiar** |
 | `Media` | Capturas de pantalla de la reunión |
 | `Notas` | **+ Nueva nota** con la hora; se guarda sola |
 | `Chat` | Preguntas sobre la sesión |
-| `Info` | Rutas en disco del JSON y del `.wav`, **▶ Escuchar**, **Borrar audio** |
+| `Info` | Rutas en disco del JSON y del `.wav`, **⤓ Exportar .md**, **▶ Escuchar**, **Borrar audio** |
 
-Barra superior de la ventana: **⚙** Configuración y **🎙**, que vuelve a mostrar el widget si lo
-cerraste. Es el único sitio desde donde se graba; nunca hay dos widgets a la vez.
+Barra superior de la ventana: **⚙** Configuración, **🎙**, que vuelve a mostrar el widget si lo
+cerraste (es el único sitio desde donde se graba; nunca hay dos widgets a la vez), y **☑
+Pendientes**: las acciones sin tildar de todas las reuniones, por responsable.
+
+| Tecla | En la ventana |
+|-------|---------------|
+| `Ctrl+F` · `Esc` | Buscar · vaciar la búsqueda o cerrar lo que esté abierto |
+| `↑` / `↓` | Sesión anterior / siguiente |
+| `Ctrl+1` … `Ctrl+7` | Pestaña |
+| `Supr` | Eliminar la sesión (pide confirmación) |
+| `Espacio` | Reproducir / pausar el audio |
+
+La primera vez, en **⚙ → Probar micro y audio de la PC**, comprueba que entran los dos canales
+antes de grabar una reunión entera.
 
 <details>
 <summary>🧩 <b>Problemas comunes</b></summary>
@@ -187,6 +232,10 @@ cerraste. Es el único sitio desde donde se graba; nunca hay dos widgets a la ve
   es cambiar el modelo en ⚙.
 - **Se cortan frases de un micro muy bajo** — el filtro de alucinaciones usa un umbral fijo
   (`SILENCE`). Sube la ganancia de entrada en Windows o baja la constante.
+- **«No se pudo eliminar: el archivo está en uso»** — el otro proceso o OneDrive lo estaba
+  leyendo. La sesión no se tocó; prueba de nuevo en unos segundos.
+- **Ctrl+Shift+R no hace nada** — otra app tiene el atajo tomado; queda anotado en
+  `notas/takemynotes-widget.log`. El botón del widget funciona igual.
 - **El `.exe` no abre y no dice nada** — mira `notas/takemynotes-widget.log` y `-window.log`.
 - **La UI se corta a 150% de escala** — ya resuelto con `SetProcessDpiAwareness`; si reaparece,
   revisa que corras la última versión.
@@ -237,13 +286,16 @@ TakeMyNotes/
 ├── check_ui.js         # check de la lógica JS (node check_ui.js)
 ├── requirements.txt    # versiones pineadas
 ├── run.bat             # crea .venv, instala y lanza
-├── build.bat           # empaqueta a dist/TakeMyNotes.exe
+├── build.bat           # empaqueta a dist/TakeMyNotes.exe (y el instalador, si hay Inno Setup)
+├── installer.iss       # instalador por usuario con carpeta en el menú Inicio
+├── docs/               # cómo está hecha por dentro y por qué (ver docs/README.md)
 ├── .env.example        # respaldo de API keys (opcional)
 ├── CHANGELOG.md        # qué cambió y por qué
 ├── settings.json       # (generado, ignorado por git) configuración y keys cifradas
 └── notas/              # (generado, ignorado por git) una sesión por archivo
-    ├── <id>.json       # nombre, fecha, transcript, turns, notes, summary, chat…
+    ├── <id>.json       # nombre, fecha, transcript, turns, notes, summary, minuta, done, chat…
     ├── <id>.wav        # audio mezclado (si keep_audio)
+    ├── <id>.md         # exportación (⤓ Exportar .md en Info)
     ├── <id>_shotNN.png # capturas de pantalla
     ├── _<id>_mic.wav   # canales crudos: viven mientras la sesión está pendiente o en
     ├── _<id>_loop.wav  #   error, para poder reintentar; se borran al transcribir bien
@@ -259,9 +311,11 @@ nombre del archivo *es* la relación, así que no hay nada que sincronizar entre
 Sin frameworks ni fixtures:
 
 ```bash
-python takemynotes.py --selftest   # audio, diálogo, eco, DPAPI, índice, servidor de medios, widget…
+python takemynotes.py --selftest   # audio, diálogo, eco, DPAPI, índice, concurrencia, widget…
 node check_ui.js                   # lógica pura de ui/index.html
 ```
+
+Qué cubre cada uno y qué queda para probar a mano: [docs/pruebas.md](docs/pruebas.md).
 
 ## 🏗️ Arquitectura
 
@@ -275,8 +329,8 @@ entre hilos → sin cuelgues):
 │                          │ notas/ │                           │
 │  · graba mic + sistema   │◄──────►│  · lee/edita sesiones     │
 │  · transcribe (Groq)     │ *.json │  · resume / chatea        │
-│  · nombra la sesión      │ *.wav  │  · busca / configura      │
-│  · escribe <id>.json     │        │  · reintenta transcripción│
+│  · resume y nombra       │ *.wav  │  · busca / configura      │
+│  · reintenta solo        │        │  · minuta / pendientes    │
 └──────────────────────────┘        └───────────────────────────┘
 ```
 
@@ -284,15 +338,19 @@ entre hilos → sin cuelgues):
   soporta transparencia real en Windows.
 - La **ventana** solo pesa cuando la abres. Un **mutex nombrado de Windows** por proceso evita
   duplicados y le deja a cada uno saber si el otro sigue vivo, sin locks huérfanos.
+- Los dos escriben los mismos JSON: todo cambio pasa por `_patch` bajo otro mutex nombrado. El
+  detalle está en [docs/concurrencia.md](docs/concurrencia.md), y el camino de la grabación al
+  acta en [docs/pipeline.md](docs/pipeline.md).
 
 <details>
 <summary><b>Por dentro</b> — eco, alucinaciones, resumen por tramos, servidor de medios…</summary>
 
-- **Audio**: 16 kHz mono, escrito a disco **en vivo** (a prueba de crash). Se limpia (quita DC +
-  normaliza el pico) antes de transcribir.
+- **Audio**: 16 kHz mono, escrito a disco **en vivo** (a prueba de crash).
 - **Transcripción por canales**: micro → "Yo", loopback → "Los demás", en **paralelo**
-  (2 llamadas Groq), fusionadas por timestamp. Archivos > ~13 min se parten en trozos de 10 min
-  (límite de 25 MB de Groq).
+  (2 llamadas Groq), fusionadas por timestamp. El audio se **lee en trozos de 10 min** (38 MB;
+  también es el límite de 25 MB de Groq), se limpia por trozo (quita DC + normaliza el pico) y el
+  `.wav` de auditoría se mezcla en streaming: la reunión de 1 h 45 pasó de ~2,5 GB de memoria a
+  ~120 MB. Un trozo **sin voz** no se sube: ahorra cuota de audio y alucinaciones.
 - **Eco del micro**: el loopback es un tap digital de la salida, así que nunca contiene tu micro;
   el micro sí capta los parlantes. `drop_echo()` empareja los segmentos de los dos canales por
   **solape de intervalos** —el eco suena a la vez que el audio que lo produce, y el timestamp de
@@ -317,7 +375,10 @@ entre hilos → sin cuelgues):
   entrada **más el tope de salida**— mientras que una reunión de una hora son ~13 000. Con Gemini
   cabe entera y el acta sale de una sola pasada, que es la diferencia entre capturar o perder un
   descarte cuya razón se dijo veinte minutos después. `split_text()` corta por párrafo en trozos
-  de `CHAT_CHARS`, se resume cada tramo y después los resúmenes. `chat()` respeta `retry-after`
+  de `CHAT_CHARS`, se resume cada tramo y después los resúmenes. Cada tramo recibe tus notas y
+  quién es quién según los tramos anteriores, con tope de salida de 2048 y razonamiento `low`
+  para no esperar al balde por minuto; el acta recibe la fecha, para escribir fechas absolutas, y
+  trae el título en su primera línea (un request menos). `chat()` respeta `retry-after`
   en los 429. Los clientes se crean con `max_retries=0` **a propósito**: los reintentos del SDK
   multiplicados por los de `chat()` gastaban 20 peticiones, y la cuota gratuita de Gemini son 20
   al día por modelo. El 429 **del día** (`tokens per day (TPD)` en Groq,
@@ -328,12 +389,13 @@ entre hilos → sin cuelgues):
   nadie se hizo cargo; y nada de expandir siglas. Al cambiar de modelo, revisar con una reunión real.
 - **Progreso**: el campo `stage` de la sesión lo escribe quien trabaja y lo lee la ventana en su
   poll. Mismo canal que todo: un archivo.
-- **Inactividad**: el grabador guarda el último bloque cuyo pico supera `VOICE` (0.05) en
+- **Inactividad**: el grabador guarda el último bloque cuyo **rms** supera `VOICE` (0.01) en
   cualquier canal; el widget compara contra `IDLE_WARN` (300 s) e `IDLE_WARN + IDLE_STOP` (420 s).
   La decisión vive en `idle_state()`, una función pura.
-- **Persistencia**: escritura **atómica** (`.tmp` + `os.replace`). Los cambios de campos sueltos van
-  por `_patch(sid, **campos)`, que aplica sobre lo que hay en disco: transcribir tarda minutos y en
-  ese rato la ventana puede estar guardando notas.
+- **Persistencia**: escritura **atómica** (`.tmp` + `os.replace`, que reintenta si otro proceso
+  tiene el archivo abierto). Los cambios van por `_patch`, que aplica sobre lo que hay en disco y
+  bajo un mutex compartido por los dos procesos; reclamar una sesión para transcribirla
+  (`claim`) comprueba y escribe en el mismo lock. Ver [docs/concurrencia.md](docs/concurrencia.md).
 - **DPI**: la ventana pide `SetProcessDpiAwareness` antes de crearse; sin eso, a 150% el viewport
   CSS quedaba en 693 px. El widget Tk se deja virtualizado a propósito.
 - **Servidor de medios**: la ventana se sirve en `http://127.0.0.1:PORT`, así que Chromium rechaza
@@ -344,8 +406,9 @@ entre hilos → sin cuelgues):
 - **Búsqueda**: índice FTS5 en `notas/.search.db`, sincronizado **solo al buscar** comparando el
   `mtime` de cada JSON. Tokenizador `unicode61 remove_diacritics 2`; la consulta se convierte a
   tokens citados con prefijo (`"presu"* "puesto"*`), AND y a prueba de sintaxis FTS.
-- **Borrado**: `delete_session` quita JSON + `.wav` + canales crudos + fila del índice. Si borras
-  una sesión mientras se transcribe, el hilo del widget **no** la resucita.
+- **Borrado**: `delete_session` quita primero el JSON, bajo el mismo mutex; si no puede, lo dice
+  y no toca nada más. Después `.wav`, `.md`, canales crudos, capturas y fila del índice. Si borras
+  una sesión mientras se transcribe, el hilo del widget **no** la resucita ni deja archivos sueltos.
 
 </details>
 
@@ -355,13 +418,16 @@ entre hilos → sin cuelgues):
 - **Cero pérdida de datos**: el audio se escribe a disco mientras grabas; el WAV se cierra en
   `finally` aunque el dispositivo falle a mitad.
 - **Transcripción reintentable**: si falla (red / key / Groq), el audio queda y aparece
-  **Reintentar**; si vuelve la red, reintenta sola.
+  **Reintentar**; si vuelve la red, reintenta sola. Un reintento automático y uno manual a la vez
+  no arrancan dos transcripciones.
 - **Si Groq retira el modelo de chat, la app no se cae**: ante un **404**, `switch_chat()` pregunta
   por `models.list()` y reintenta con el primer relevo de `CHAT_ALT` que esa key vea.
 - **Sin sesiones zombis**: cada `pending` guarda el PID del proceso que la transcribe; si murió, la
   sesión pasa a error con **Reintentar** y el barrido automático la recoge al abrir la app.
-- **Una transcripción a la vez**: dos en paralelo serían ~2 GB de WAV en `float32` en memoria y el
-  doble de tokens por minuto. La que espera se muestra "En cola…".
+- **Una transcripción a la vez**: dos en paralelo serían el doble de tokens por minuto. La que
+  espera se muestra "En cola…". El audio se lee en trozos de 10 min (~38 MB), no entero.
+- **Dos procesos, un JSON**: todo cambio pasa por `_patch` bajo un mutex nombrado de Windows, y
+  `os.replace` reintenta si el otro proceso (u OneDrive) tiene el archivo abierto.
 - **Índice desechable**: `notas/.search.db` es caché, no datos. Bórralo y se reconstruye.
 - **Log diagnosticable**: tracebacks completos en `notas/*.log`, incluido cualquier crash del `.exe`.
 
@@ -383,8 +449,11 @@ entre hilos → sin cuelgues):
   sin ella. El `<mark>` de la UI no ignora acentos aunque la búsqueda sí.
 - **El markdown renderizado es un subconjunto** (títulos, negrita, itálica, `código`, listas); por
   eso `SUM_SYS` le prohíbe tablas al modelo.
-- **Sin streaming** de texto ni atajo global de teclado.
-- La librería relee los JSON en cada listado: bien para decenas de sesiones, no para miles.
+- **Los tildes de acciones son posiciones en el acta**: al rehacer el acta se pierden.
+- **Las notas con hora usan la hora del reloj**: si pausaste la grabación, las notas posteriores se
+  corren lo que duró la pausa.
+- **Sin streaming** de texto. El atajo global (**Ctrl+Shift+R**) es fijo: si otra app lo tiene tomado, no hay atajo (queda en el log). Le gana al «recargar» de los navegadores.
+- La librería relee solo los JSON que cambiaron, pero Pendientes y la búsqueda sí los abren: bien para cientos de sesiones, no para miles.
 
 ### Decisiones
 
@@ -399,6 +468,11 @@ entre hilos → sin cuelgues):
 - **Eco por texto en vez de cancelación por señal** → no depende del volumen de cada PC, no pierde
   audio y se prueba sin micrófono. Se paga transcribir dos veces, que con Whisper turbo es barato.
 - **DPAPI en vez de `keyring`** → ctypes puro, ~15 líneas, sin dependencia ni `hiddenimport`.
+
+## 📚 Documentación
+
+Cómo está hecha por dentro y por qué: [docs/](docs/README.md). El registro de la revisión del
+30/09/2026, ítem por ítem, está en [docs/revision-2026-09-30.md](docs/revision-2026-09-30.md).
 
 ---
 

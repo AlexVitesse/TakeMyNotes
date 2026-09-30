@@ -1,7 +1,7 @@
 /* Tokens Apple (DESIGN-apple.md): vocabulario, no densidad de marketing. */
 :root{
   --blue:#0066cc; --blue-focus:#0071e3; --ink:#1d1d1f;
-  --muted-80:#333; --muted-48:#7a7a7a; --hairline:#e0e0e0; --divider:#f0f0f0;
+  --muted-80:#333; --muted-48:#6e6e73; --hairline:#e0e0e0; --divider:#f0f0f0;
   --canvas:#fff; --parchment:#f5f5f7; --rec:#ff3b30;
   --bar:rgba(245,245,247,.8); --hover:rgba(0,0,0,.05); --edge:rgba(0,0,0,.10);
   --warnbg:#fff4f2; --warnfg:#b3261e; --okfg:#1a7f37; --star:#f5a623;
@@ -27,6 +27,9 @@ button{font-family:var(--font);cursor:pointer;border:none;background:none;color:
 .pill{background:var(--blue);color:#fff;border-radius:9999px;padding:9px 20px;
   font-size:15px;letter-spacing:-.2px;transition:transform .1s}
 .pill:active{transform:scale(.95)}
+/* foco de teclado (Tab, y los atajos de la ventana): sin esto no se ve dónde estás */
+button:focus-visible,.sw:focus-visible,summary:focus-visible,input[type=checkbox]:focus-visible{
+  outline:2px solid var(--blue-focus);outline-offset:2px}
 .pill.ghost{background:transparent;color:var(--blue);border:1px solid var(--blue)}
 .pill:disabled{background:var(--muted-48);color:#fff;cursor:default}
 .pill.danger{background:var(--warnfg)}       /* borrar es irreversible: que se vea */
@@ -53,6 +56,10 @@ button{font-family:var(--font);cursor:pointer;border:none;background:none;color:
   display:flex;gap:6px;align-items:center}
 .favf{width:34px;height:34px;flex:none;border-radius:50%;color:var(--muted-48);font-size:15px}
 .favf:hover{background:var(--hover)}
+.qx{width:24px;height:24px;flex:none;margin-left:-36px;border-radius:50%;font-size:11px;
+  color:var(--muted-48);position:relative}
+.qx:hover{background:var(--hover);color:var(--ink)}
+.search input{padding-right:30px}
 .favf.on{background:var(--star);color:#fff}
 .star{color:var(--star)}
 .search input{width:100%;height:36px;border-radius:9999px;border:1px solid var(--edge);
@@ -71,6 +78,8 @@ mark.me{background:var(--star);color:#1d1d1f;font-weight:600}   /* te mencionaro
 .sitem .kebab:hover{background:var(--hover);color:var(--ink)}
 .sitem .meta{font-size:13px;color:var(--muted-48);margin-top:2px}
 .sitem .pend{color:var(--blue)}
+.nosum{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--star);
+  margin-right:6px;vertical-align:1px}
 
 /* detalle */
 .detail{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--canvas)}
@@ -147,7 +156,7 @@ mark.me{background:var(--star);color:#1d1d1f;font-weight:600}   /* te mencionaro
 .shot:hover{box-shadow:0 0 0 2px var(--blue-focus)}
 
 /* modal settings */
-.mask{position:fixed;inset:0;background:rgba(0,0,0,.28);display:none;
+.mask{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.28);display:none;
   align-items:center;justify-content:center;padding:16px}
 .mask.show{display:flex}
 /* La ventana mide 680px de alto como mucho y Configuración ya pasa de 1100: sin esto el modal
@@ -230,10 +239,41 @@ mark.me{background:var(--star);color:#1d1d1f;font-weight:600}   /* te mencionaro
 .turn .say p{margin:0 0 9px}
 .turn .say p:last-child{margin-bottom:0}
 .content.md,.msg.md{white-space:normal}
+.msg,.md{user-select:text}
 .md h4{font-size:17px;font-weight:600;margin:16px 0 4px}
 .md h4:first-child{margin-top:0}
-.md ul{margin:6px 0 6px 22px}
+.md ul,.md ol{margin:6px 0 6px 22px}
 .md li{margin:3px 0}
 .md strong{font-weight:600}
 .md code{font-family:ui-monospace,Consolas,monospace;font-size:14px;background:var(--parchment);
   padding:1px 5px;border-radius:4px}
+
+/* 4.7 acciones del acta con tilde */
+.md li.act{list-style:none;margin-left:-22px}
+.md li.act input{margin-right:8px;accent-color:var(--blue);cursor:pointer;vertical-align:-1px}
+.md li.act.done{color:var(--muted-48);text-decoration:line-through}
+.md .from{margin-left:8px;font-size:13px;color:var(--blue);cursor:pointer;text-decoration:none}
+.md .from:hover{text-decoration:underline}
+/* 4.8 notas con hora, intercaladas en la transcripción */
+.turn.note .who{color:var(--star)}
+.turn.note .say{font-style:italic;color:var(--muted-80)}
+/* 4.9 la etiqueta de quien habla se renombra con un clic */
+.who.ren{cursor:text;display:inline-block;border-radius:4px;padding:0 3px;margin-left:-3px}
+.who.ren:hover{background:var(--hover);color:var(--ink)}
+/* 4.3 */
+.hint.aside,.hint.pad{font-size:13px;color:var(--muted-48);margin:8px 0 12px}
+.hint.aside a{color:var(--blue);cursor:pointer}
+/* 4.10 Configuración en dos bloques, y la prueba de audio */
+.modal .sect{margin:22px 0 -8px;font-size:12px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.4px;color:var(--muted-48)}
+.modal details{margin-top:6px;font-size:13px}
+.modal summary{cursor:pointer;color:var(--blue)}
+.arow{display:flex;align-items:center;gap:10px;margin-top:8px}
+.lvl{width:48px;height:6px;border-radius:3px;background:var(--divider);overflow:hidden}
+.lvl i{display:block;height:100%;width:0;background:var(--okfg);transition:width .3s}
+/* 5: toast abajo a la derecha: "Copiado ✓" y errores, que en la barra de arriba no se veían */
+.toast{position:fixed;right:20px;bottom:20px;z-index:30;max-width:360px;padding:10px 16px;
+  border-radius:12px;background:var(--ink);color:var(--canvas);font-size:14px;
+  box-shadow:0 8px 24px rgba(0,0,0,.2);opacity:0;transform:translateY(8px);
+  transition:opacity .2s,transform .2s;pointer-events:none}
+.toast.show{opacity:1;transform:none}

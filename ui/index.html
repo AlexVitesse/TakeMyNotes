@@ -3,8 +3,11 @@
 <body>
 <div class="app">
   <div class="topbar">
-    <button id="gear" class="iconbtn" title="Configuración">⚙</button>
-    <button id="pill" class="iconbtn" title="Mostrar el widget de grabación">🎙</button>
+    <button id="gear" class="iconbtn" title="Configuración" aria-label="Configuración">⚙</button>
+    <button id="pill" class="iconbtn" title="Mostrar el widget de grabación"
+            aria-label="Mostrar el widget de grabación">🎙</button>
+    <button id="pendb" class="iconbtn" title="Acciones pendientes de todas las sesiones"
+            aria-label="Acciones pendientes">☑</button>
     <span class="title">TakeMyNotes</span>
     <span class="spacer"></span>
     <span id="status" class="status"></span>
@@ -12,8 +15,10 @@
   <div class="body">
     <div class="side">
       <div class="search">
-        <input id="q" placeholder="Buscar en las sesiones…">
-        <button id="favf" class="favf" title="Ver solo favoritos">★</button>
+        <input id="q" placeholder="Buscar en las sesiones…" aria-label="Buscar en las sesiones">
+        <button id="qx" class="qx" title="Limpiar la búsqueda" aria-label="Limpiar la búsqueda"
+                style="display:none">✕</button>
+        <button id="favf" class="favf" title="Ver solo favoritos" aria-label="Ver solo favoritos">★</button>
       </div>
       <div id="list"></div>
     </div>
@@ -27,11 +32,15 @@
   <button onclick="menuAct('del')" class="danger">Eliminar</button>
 </div>
 
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
 <!-- Confirmación propia y no confirm(): el diálogo nativo depende de que WebView2 permita
-     script dialogs, bloquea el hilo de la vista y se ve como una alerta del sistema. -->
+     script dialogs, bloquea el hilo de la vista y se ve como una alerta del sistema.
+     Con #cin visible hace de prompt (renombrar a quien habla). -->
 <div id="cmask" class="mask"><div class="modal">
   <h3 id="ctitle"></h3>
   <div class="hint" id="ctext"></div>
+  <input id="cin" type="text" maxlength="24" style="display:none">
   <div class="mrow">
     <button class="pill ghost" onclick="closeConfirm()">Cancelar</button>
     <button class="pill danger" id="cyes" onclick="confirmYes()">Eliminar</button>
@@ -40,14 +49,15 @@
 
 <div id="mask" class="mask"><div class="modal">
   <h3>Configuración</h3>
+  <h4 class="sect">General</h4>
   <div class="row toggle">
     <div><label>Guardar audio</label><div class="hint">Queda el .wav de cada sesión para poder
       auditarla (~110 MB por hora). Se escucha y se borra desde la pestaña Info.</div></div>
-    <div id="sw" class="sw"></div>
+    <div id="sw" class="sw" role="switch" tabindex="0" aria-label="Guardar audio"></div>
   </div>
   <div class="row toggle">
     <div><label>Identificar hablantes</label><div class="hint">Etiqueta "Yo" vs "Los demás" (2 llamadas a Groq).</div></div>
-    <div id="sw2" class="sw"></div>
+    <div id="sw2" class="sw" role="switch" tabindex="0" aria-label="Identificar hablantes"></div>
   </div>
   <div class="row toggle">
     <div><label>Tema</label><div class="hint">Auto sigue el tema de Windows.</div></div>
@@ -64,6 +74,17 @@
       te mencionan. Se aplica a las sesiones nuevas.</div>
   </div>
   <div class="row">
+    <label>Audio</label>
+    <div class="arow">
+      <button class="pill ghost sm" id="abtn" onclick="testAudio()">Probar micro y audio de la PC</button>
+      <span class="lvl" title="Micrófono"><i id="lmic"></i></span>
+      <span class="lvl" title="Audio de la PC"><i id="lloop"></i></span>
+    </div>
+    <div class="hint" id="amsg">5 segundos: habla y pon algo a sonar. Mejor saberlo antes que al
+      terminar una reunión.</div>
+  </div>
+  <h4 class="sect">Inteligencia artificial</h4>
+  <div class="row">
     <label>API key de Groq</label>
     <input id="key" type="password" placeholder="gsk_…">
     <div class="hint">Transcribe y, si no pones la de abajo, también resume.
@@ -72,15 +93,20 @@
   <div class="row">
     <label>API key de Gemini <span class="opt">opcional, para el resumen</span></label>
     <input id="gkey" type="password" placeholder="AIza…">
-    <div class="warn">Con el plan gratuito de Gemini, Google usa lo que le mandes —
-      la transcripción completa de la reunión y el resumen — para entrenar sus productos, y
-      revisores humanos pueden leerlo. No la pongas si en tus reuniones se habla de clientes,
-      cifras o cualquier cosa que no publicarías. En el plan de pago de Google eso no pasa.</div>
-    <div class="hint">A cambio, la reunión entra entera en una sola pasada en vez de resumirse
-      por tramos: mejoran los descartes, los acuerdos del cierre y quién dijo qué.
-      No hay que elegir proveedor: con las dos puestas se resume con Gemini y, si un día no
-      puede (se acabó la cuota, se cayó), lo rehace Groq solo y la reunión no se queda sin acta.
-      Se guarda cifrada igual que la de Groq. Vaciar el campo no la borra: usa Quitar.</div>
+    <div class="hint">Resume la reunión entera de una pasada. Ojo: en el plan gratuito, Google
+      entrena con lo que le mandes.</div>
+    <details>
+      <summary>¿Por qué opcional?</summary>
+      <div class="warn">Con el plan gratuito de Gemini, Google usa lo que le mandes —
+        la transcripción completa de la reunión y el resumen — para entrenar sus productos, y
+        revisores humanos pueden leerlo. No la pongas si en tus reuniones se habla de clientes,
+        cifras o cualquier cosa que no publicarías. En el plan de pago de Google eso no pasa.</div>
+      <div class="hint">A cambio, la reunión entra entera en una sola pasada en vez de resumirse
+        por tramos: mejoran los descartes, los acuerdos del cierre y quién dijo qué.
+        No hay que elegir proveedor: con las dos puestas se resume con Gemini y, si un día no
+        puede (se acabó la cuota, se cayó), lo rehace Groq solo y la reunión no se queda sin acta.
+        Se guarda cifrada igual que la de Groq. Vaciar el campo no la borra: usa Quitar.</div>
+    </details>
   </div>
   <div class="row">
     <label>Modelo para los resúmenes <span class="opt">opcional</span></label>
@@ -102,9 +128,16 @@
 <script>
 const $=s=>document.querySelector(s);
 let sessions=[], cur=null, tab='summary', keepAudio=false, labelSp=true, query='';
-let theme='auto', saved={}, related=null, favOnly=false, myName='';
+let theme='auto', saved={}, related=null, favOnly=false, myName='', asking=false, pendView=false;
+// Orden de las pestañas: también el de Ctrl+1…7
+const TABS=[['summary','Resumen'],['minuta','Minuta'],['transcript','Transcripción'],
+  ['media','Media'],['notes','Notas'],['chat','Chat'],['info','Info']];
 
 function setStatus(t){$('#status').textContent=t||'';}
+// Lo que tiene que verse aunque no mires la barra de arriba: "Copiado ✓", errores.
+let toastT;
+function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('show');
+  clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2000);}
 // También " y ': así lo mismo sirve para texto y para dentro de un atributo (las rutas de la
 // pestaña Info viajan por un onclick y una carpeta con apóstrofo cerraría el atributo).
 function esc(s){return (s||'').replace(/[&<>"']/g,
@@ -121,6 +154,19 @@ function whenText(s){
   const [y,m,d]=(s.date||'').split('-');
   if(y===String(now.getFullYear()))return `${d}-${m}`;
   return s.date;
+}
+// Encabezado de grupo de la lista: con decenas de sesiones, la lista plana es un muro
+const MESES=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre',
+  'Octubre','Noviembre','Diciembre'];
+function groupOf(date,now=new Date()){
+  const [y,m,d]=(date||'').split('-').map(Number);
+  if(!y)return 'Sin fecha';
+  const hoy=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const dias=Math.round((hoy-new Date(y,m-1,d))/864e5);
+  if(dias<=0)return 'Hoy';
+  if(dias===1)return 'Ayer';
+  if(dias<7)return 'Esta semana';
+  return MESES[m-1]+(y===now.getFullYear()?'':' '+y);
 }
 function metaText(s){return s.stage?esc(s.stage)                  // "Transcribiendo… 3/12"
   :s.status==='pending'?'Transcribiendo…'
@@ -147,19 +193,36 @@ function turnsOf(s){
   return (s.transcript||'').split('\n\n').filter(b=>b.trim()).map(b=>{
     const m=b.match(LBL);
     return m?{t:null,who:m[1],text:m[2]}:{t:null,who:'',text:b};});}
+// Las entradas "— 10:32 —" de las notas, como segundo de la sesión: la hora del reloj menos la
+// de inicio, que es el id (YYYYmmdd_HHMMSS). Así la nota escrita a las apuradas se vuelve una
+// fila más de la transcripción y salta el audio a ese momento. Sin guardar nada nuevo.
+// ponytail: una pausa en la grabación corre las notas posteriores lo que duró la pausa.
+function noteMarks(s){
+  const m=(s.id||'').match(/^\d{8}_(\d\d)(\d\d)(\d\d)$/);
+  if(!m)return [];
+  const t0=+m[1]*3600+ +m[2]*60+ +m[3],out=[];
+  const p=(s.notes||'').split(/^— (\d\d):(\d\d)(?::(\d\d))? —[ \t]*$/m);
+  for(let i=1;i+3<p.length;i+=4){
+    const t=+p[i]*3600+ +p[i+1]*60+ +(p[i+2]||0)-t0,text=(p[i+3]||'').trim();
+    if(text&&t>=0&&t<=(s.dur||0)+60)out.push({t,who:'Nota',text,note:true});}
+  return out;}
 const mmss=t=>{const s=Math.max(0,Math.round(t));
   return (s/60|0).toString().padStart(2,'0')+':'+(s%60).toString().padStart(2,'0');};
 // Formato tl;dv: una fila por turno, con el minuto a la izquierda. Clic = el audio salta ahí.
 function turnRows(s){
-  const T=turnsOf(s);
+  let T=turnsOf(s);
+  if(T.some(x=>x.t!=null))T=[...T,...noteMarks(s)].sort((a,b)=>a.t-b.t);   // notas en su minuto
   // La etiqueta solo cuando CAMBIA de hablante: en una sesión sin alternancia (un solo canal con
   // audio, o el colapso de eco) todos los turnos son del mismo y repetirla en cada fila es ruido.
+  // Clic en la etiqueta = renombrar a ese hablante en toda la sesión ("Los demás" -> "Acme").
   return T.map((x,i)=>
-    `<div class="turn${isMe(x.who)?' mine':''}${i&&T[i-1].who===x.who?' cont':''}" data-i="${i}"${
+    `<div class="turn${isMe(x.who)?' mine':''}${x.note?' note':''}${i&&T[i-1].who===x.who?' cont':''}" data-i="${i}"${
       x.t==null?'':` data-t="${x.t}" onclick="seek(${x.t})"`}>
        <div class="tt">${x.t==null?'':mmss(x.t)}</div>
-       <div class="tx">${i&&T[i-1].who===x.who?'':
-           `<div class="who">${esc(x.who||'Transcripción')}</div>`}
+       <div class="tx">${i&&T[i-1].who===x.who?'':x.note||!x.who?
+           `<div class="who">${esc(x.who||'Transcripción')}</div>`:
+           `<div class="who ren" title="Renombrar a quien habla"
+              onclick='event.stopPropagation();renameWho(${jsarg(x.who)})'>${esc(x.who)}</div>`}
          <div class="say">${sayHtml(x.text)}</div></div>
      </div>`).join('');}
 // Un turno de 42 KB es ilegible aunque el tope de dialog_turns evite que se vuelvan a crear:
@@ -183,8 +246,10 @@ const skeleton='<div class="content">'+skel+'</div>';
 // eso tarda minutos y sin decir en qué va parece colgado.
 const spin=t=>`<div class="wait"><span class="spinner"></span><span>${esc(t)}</span></div>`;
 // El modelo responde en markdown: se renderiza el subconjunto que usa, sobre texto YA escapado.
-function md(t){
-  return esc(t||'')
+// Con `done` (el acta), los bullets de ACCIONES llevan su checkbox: el índice cuenta los bullets
+// de esa sección en orden, igual que acciones() en Python, y es lo que se guarda en s.done.
+function md(t,done){
+  let h=esc(t||'')
     .replace(/^#{1,4}\s+(.*)$/gm,'<h4>$1</h4>')
     // El acta titula sus secciones con una línea suelta en mayúsculas (ACCIONES, DECIDIDO...):
     // sin esto son texto normal, y con white-space:normal quedan pegadas al párrafo de al lado.
@@ -193,13 +258,24 @@ function md(t){
     .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
     .replace(/(^|[\s(])\*([^*\n]+?)\*/g,'$1<em>$2</em>')
     .replace(/`([^`\n]+)`/g,'<code>$1</code>')
-    .replace(/^\s*(?:[-*•]|\d+\.)\s+(.*)$/gm,'<li>$1</li>')
+    // numeradas aparte y con su número (value): en la minuta, "acuerdo 3" tiene que seguir
+    // siendo el 3 aunque una línea de "Discusión:" parta la lista en dos
+    .replace(/^\s*(\d+)\.\s+(.*)$/gm,'<li value="$1">$2</li>')
+    .replace(/^\s*[-*•]\s+(.*)$/gm,'<li>$1</li>')
     .replace(/(?:<li>.*<\/li>\n?)+/g,m=>'<ul>'+m.replace(/\n/g,'')+'</ul>')
+    .replace(/(?:<li value="\d+">.*<\/li>\n?)+/g,m=>'<ol>'+m.replace(/\n/g,'')+'</ol>')
     // white-space:normal se come los saltos, y el acta los usa: una línea por persona en
     // QUIÉNES, y el responsable encabezando su grupo de acciones. Sin esto, todo eso es un
     // solo párrafo corrido. Los saltos pegados a un título o a una lista sí sobran.
-    .replace(/\n*(<\/?(?:h4|ul)>)\n*/g,'$1')
+    .replace(/\n*(<\/?(?:h4|ul|ol)>)\n*/g,'$1')
     .replace(/\n/g,'<br>');
+  if(done){let n=0;
+    h=h.replace(/<h4>([^<]*)<\/h4>((?:(?!<h4>)[\s\S])*)/g,(m,title,body)=>
+      !/^acciones/i.test(title.trim())?m:'<h4>'+title+'</h4>'+body.replace(/<li( value="\d+")?>/g,
+        (x,v)=>{const i=n++,on=done.includes(i);
+          return `<li${v||''} class="act${on?' done':''}"><input type="checkbox"
+            aria-label="Hecha" onclick="toggleAct(${i})"${on?' checked':''}>`;}));}
+  return h;
 }
 
 async function boot(){
@@ -219,7 +295,7 @@ async function loadList(sel){
   clearTimeout(rT);
   if(query.length>=4&&sessions.length<3)rT=setTimeout(()=>relatedSearch(query),1000);
   if(sel)select(sel);
-  else if(!cur&&sessions.length)select(sessions[0].id);
+  else if(!cur&&!pendView&&sessions.length)select(sessions[0].id);
   else if(!sessions.length&&!query)renderEmpty();
   else if(!sessions.length)$('#detail').innerHTML='<div class="empty"><div>Sin resultados</div></div>';
 }
@@ -228,11 +304,25 @@ async function loadList(sel){
 async function refreshList(){
   sessions=await fetchSessions();
   renderList();
-  if(!cur&&sessions.length)select(sessions[0].id);
+  if(!cur&&!pendView&&sessions.length)select(sessions[0].id);
   else if(!sessions.length&&!query)renderEmpty();
 }
-let tick=0,stamp=null;
+// ¿Estás escribiendo en el detalle? Entonces el poll no lo repinta: renderDetail() reemplaza el
+// DOM, y con él se iban el foco y el cursor de las notas, del chat o del título.
+function typing(){const a=document.activeElement;
+  return !!a&&(a.id==='ta'||a.id==='cq'||!!(a.classList&&a.classList.contains('nm')));}
+function freshCur(s){                   // datos nuevos del disco para el detalle abierto
+  if(typing()){if(document.activeElement.id==='ta')s.notes=cur.notes;cur=s;return;}
+  cur=s;renderDetail();}
+let tick=0,stamp=null,polling=false;
 async function poll(){
+  // con un backend lento, un tick puede tardar más que el intervalo: sin esto se solapan y
+  // dos refreshList escriben la lista a la vez
+  if(polling)return;
+  polling=true;
+  try{await pollOnce();}finally{polling=false;}
+}
+async function pollOnce(){
   // el ⚙ del widget cada 10 s y no cada 2,5: sin nada pendiente el poll no cruza el puente
   if(tick++%4===0&&await pywebview.api.take_action()==='settings')openSettings();
   // ¿cambió el contenido de notas/? Un stat contra el mtime de la carpeta. Sin esto, la sesión
@@ -245,14 +335,14 @@ async function poll(){
   // tramo se quedaba girando: ese _patch borra el stage y cambia el mtime de notas/, así que
   // refreshList() traía los metadatos ya limpios, la sesión salía de `pend` y el bucle de abajo
   // nunca llegaba a refrescar `cur` — "Resumiendo… 3/3" hasta que cambiabas de sesión.
-  if(cur&&(cur.stage||cur.status==='pending')&&!pend.some(p=>p.id===cur.id)){
-    cur=await pywebview.api.get_session(cur.id);renderDetail();}
+  if(cur&&(cur.stage||cur.status==='pending')&&!pend.some(p=>p.id===cur.id))
+    freshCur(await pywebview.api.get_session(cur.id));
   if(!pend.length)return;
   try{
     for(const p of pend){
       const s=await pywebview.api.get_session(p.id);
       Object.assign(p,{status:s.status,name:s.name,fav:s.fav,stage:s.stage});
-      if(cur&&cur.id===p.id&&JSON.stringify(s)!==JSON.stringify(cur)){cur=s;renderDetail();}
+      if(cur&&cur.id===p.id&&JSON.stringify(s)!==JSON.stringify(cur))freshCur(s);
     }
   }catch(e){await loadList(cur?cur.id:undefined);return;}   // la borraron: releer todo
   renderList();
@@ -262,17 +352,23 @@ async function poll(){
 const itemHtml=s=>`
     <div class="sitem ${cur&&cur.id===s.id?'sel':''} ${s.status==='pending'||s.stage?'busy':''}"
          onclick="select('${s.id}')">
-      <button class="kebab" title="Opciones" onclick="menu(event,'${s.id}')">⋯</button>
+      <button class="kebab" title="Opciones" aria-label="Opciones" onclick="menu(event,'${s.id}')">⋯</button>
       <div class="nm">${s.fav?'<span class="star">★</span> ':''}${esc(s.name||'Sesión')}</div>
-      <div class="meta ${s.status==='pending'?'pend':''}">${metaText(s)}</div>
+      <div class="meta ${s.status==='pending'?'pend':''}">${s.nosum&&!s.stage
+        ?'<span class="nosum" title="Sin acta: falló el resumen"></span>':''}${metaText(s)}</div>
       ${s.status==='pending'||s.stage?skel
         :s.snip?`<div class="snip">${highlight(s.snip)}</div>`:''}
     </div>`;
 const visible=()=>sessions.filter(s=>!favOnly||s.fav);
 const findMeta=id=>sessions.find(s=>s.id===id)||(related&&related.hits.find(s=>s.id===id));
 function renderList(){
-  let h=visible().map(itemHtml).join('');
-  if(favOnly&&!h)h='<div class="rel">Sin favoritos todavía</div>';
+  const V=visible();let h='',g=null;
+  // Buscando, el orden es por relevancia y los grupos por fecha lo romperían: va el contador
+  if(query)h+=`<div class="rel">${V.length} ${V.length===1?'sesión':'sesiones'}</div>`;
+  for(const s of V){
+    if(!query){const k=groupOf(s.date);if(k!==g){g=k;h+=`<div class="rel">${esc(k)}</div>`;}}
+    h+=itemHtml(s);}
+  if(favOnly&&!V.length)h+='<div class="rel">Sin favoritos todavía</div>';
   if(related&&related.hits.length)      // sugerencias del buscador, siempre marcadas como tales
     h+=`<div class="rel">Relacionados con: ${esc(related.terms.join(', '))}</div>`
       +related.hits.map(itemHtml).join('');
@@ -282,7 +378,7 @@ let rT;
 async function relatedSearch(q){        // "engaño" cuando en la reunion se dijo "fraude"
   setStatus('Buscando relacionados…');
   const r=await pywebview.api.search_related(q,sessions.map(s=>s.id));   // ya los tenemos acá
-  setStatus(r.msg||'');
+  setStatus('');if(r.msg)toast('⚠ '+r.msg);
   if(q!==query)return;                  // el usuario ya escribio otra cosa
   related=r;renderList();
 }
@@ -316,42 +412,41 @@ function renderEmpty(){
     </div>`;
 }
 async function select(id){
+  pendView=false;
   $('#detail').innerHTML=skeleton;              // no congelar la vista mientras carga
   cur=await pywebview.api.get_session(id);
   if(query&&cur.transcript)tab='transcript';    // desde el buscador: al fragmento, no al resumen
   renderList();renderDetail();
+  document.querySelector('.sitem.sel')?.scrollIntoView?.({block:'nearest'});
   if(query)document.querySelector('#pane mark')?.scrollIntoView({block:'center'});}
 
 function renderDetail(){
-  const s=cur;
+  const s=cur,dot=k=>({media:((s.paths||{}).shots||[]).length,notes:s.notes,minuta:s.minuta,
+    chat:s.chat&&s.chat.length}[k]?' •':'');
   $('#detail').innerHTML=`
     <div class="dhead">
       <div class="hrow">
         <div class="nm" contenteditable="true" spellcheck="false" onblur="rename(this)"
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
              >${esc(s.name||'Sesión')}</div>
-        <button class="iconbtn fav ${s.fav?'on':''}" title="Favorito"
+        <button class="iconbtn fav ${s.fav?'on':''}" title="Favorito" aria-label="Favorito"
                 onclick="toggleFav()">${s.fav?'★':'☆'}</button>
-        <button class="iconbtn" title="Opciones" onclick="menu(event,'${s.id}')">⋯</button>
+        <button class="iconbtn" title="Opciones" aria-label="Opciones" onclick="menu(event,'${s.id}')">⋯</button>
       </div>
       <div class="meta">${esc(s.date+' · '+s.time+' · '+fmtDur(s.dur))}</div>
     </div>
     ${s.warn?`<div class="warn">⚠ Aviso: ${esc(s.warn)}. Revisa tu dispositivo la próxima vez.</div>`:''}
-    <div class="seg">
-      ${seg('summary','Resumen')}${seg('transcript','Transcripción')}
-      ${seg('media','Media'+(((s.paths||{}).shots||[]).length?' •':''))}
-      ${seg('notes','Notas'+(s.notes?' •':''))}${seg('chat','Chat'+(s.chat&&s.chat.length?' •':''))}
-      ${seg('info','Info')}
-    </div>
+    <div class="seg" role="tablist">${TABS.map(([k,l])=>seg(k,l+dot(k))).join('')}</div>
     <div id="pane" class="content"></div>
     <div id="chatbar"></div>`;
   renderPane();
 }
-const seg=(k,l)=>`<button class="${tab===k?'on':''}" onclick="setTab('${k}')">${l}</button>`;
+const seg=(k,l)=>`<button class="${tab===k?'on':''}" role="tab" aria-selected="${tab===k}"
+  onclick="setTab('${k}')">${l}</button>`;
 function setTab(t){tab=t;renderDetail();}
 
 function renderPane(){
-  const s=cur,p=$('#pane'),cb=$('#chatbar');cb.innerHTML='';p.className='content';
+  const s=cur,p=$('#pane'),cb=$('#chatbar');cb.innerHTML='';cb.className='';p.className='content';
   if(tab==='transcript'){
     if(s.status==='pending')p.innerHTML=skel+spin(s.stage||'Transcribiendo…');
     else if(s.status==='error')p.innerHTML=`<div class="warn">No se pudo transcribir: ${esc(s.error)}</div>
@@ -383,22 +478,42 @@ function renderPane(){
       :`<div class="hint">Todavía no hay capturas de esta sesión. Se toman con el botón de la
           cámara del widget, mientras grabás.</div>`);
   }else if(tab==='summary'){
-    if(s.stage)p.innerHTML=spin(s.stage);      // transcribiendo o resumiendo: el resumen ya viene
+    // la minuta también pone stage, pero el acta ya está: no hay por qué taparla
+    if(s.stage&&!/minuta/i.test(s.stage))p.innerHTML=spin(s.stage)
+      // transcribió y está resumiendo: sin esto parecía que no había nada que leer todavía
+      +(s.status==='done'&&s.transcript?`<div class="hint aside">Mientras tanto, la transcripción
+        ya está en <a onclick="setTab('transcript')">su pestaña</a>.</div>`:'');
     // rehacer: el resumen viejo se queda en pantalla hasta que llega el nuevo, y si
     // falla, doSummary deja el error sin haber borrado nada
     else if(s.summary){p.className='content md';p.innerHTML=
       (s.sum_error?`<div class="warn">No se pudo rehacer: ${esc(s.sum_error)}</div>`:'')
-      +md(s.summary)
-      +`<div class="actions"><button class="pill ghost sm" onclick="doSummary()"
+      +md(s.summary,s.done||[])
+      +`<div class="actions"><button class="pill ghost sm" onclick="copyText(cur.summary,'Acta copiada ✓')">⧉ Copiar acta</button>
+        <button class="pill ghost sm" onclick="doSummary()"
         ${s.status!=='done'?'disabled':''}>↻ Rehacer resumen</button></div>`;}
     else p.innerHTML=(s.sum_error?`<div class="warn">No se pudo resumir: ${esc(s.sum_error)}</div>`:'')
       +`<div class="actions"><button class="pill" onclick="doSummary()"
         ${s.status!=='done'?'disabled':''}>▶ Generar resumen</button></div>`;
+  }else if(tab==='minuta'){
+    // Se pide a mano, cuando se va a enviar: el acta sale sola, la minuta no gasta cuota de más
+    if(s.stage)p.innerHTML=spin(s.stage);
+    else if(s.minuta){p.className='content md';p.innerHTML=
+      (s.min_error?`<div class="warn">No se pudo rehacer: ${esc(s.min_error)}</div>`:'')
+      +md(s.minuta)
+      +`<div class="actions"><button class="pill ghost sm" onclick="copyText(cur.minuta,'Minuta copiada ✓')">⧉ Copiar minuta</button>
+        <button class="pill ghost sm" onclick="doMinuta()">↻ Rehacer minuta</button></div>`;}
+    else p.innerHTML=(s.min_error?`<div class="warn">No se pudo redactar: ${esc(s.min_error)}</div>`:'')
+      +`<div class="hint pad">La minuta es el documento formal para enviar a los asistentes:
+        orden del día, acuerdos numerados con responsable y fecha. Sale del acta en un solo
+        request${s.summary?'':' (si todavía no hay acta, se genera primero)'}.</div>
+        <div class="actions"><button class="pill" onclick="doMinuta()"
+        ${s.status!=='done'||!(s.transcript||s.notes)?'disabled':''}>▶ Generar minuta</button></div>`;
   }else if(tab==='notes'){
     p.className='content notes';
     p.innerHTML=`<div class="notebar">
         <button class="pill ghost sm" onclick="newNote()">+ Nueva nota</button>
-        <span class="hint">Se guardan solas. Al resumir, la IA las mezcla con la transcripción.</span>
+        <span class="hint">Se guardan solas. Al resumir, la IA las mezcla con la transcripción.
+          Las que llevan hora aparecen en su minuto de la transcripción.</span>
       </div>
       <textarea id="ta" placeholder="Escribe acá durante la reunión. Cada «+ Nueva nota» agrega una entrada con la hora.">${esc(s.notes)}</textarea>`;
     let t;$('#ta').oninput=e=>{cur.notes=e.target.value;
@@ -411,6 +526,7 @@ function renderPane(){
       <div class="path" title="Mostrar en el Explorador" onclick='reveal(${jsarg(P.json)})'
         >${esc(P.json)}</div>
       <div class="hint">Ahí vive todo lo de esta sesión: el texto, el resumen, las notas y el chat.</div>
+      <div class="actions"><button class="pill ghost sm" onclick="exportMd()">⤓ Exportar .md</button></div>
       <h4>Audio de auditoría</h4>
       ${P.audio?`<div class="path" title="Mostrar en el Explorador" onclick='reveal(${jsarg(P.audio)})'
           >${esc(P.audio)}</div>
@@ -431,8 +547,10 @@ function renderPane(){
     p.innerHTML=(s.chat||[]).map(m=>`<div class="msg q">${esc(m.q)}</div><div class="msg a md">${md(m.a)}</div>`).join('')
       ||'<div style="color:var(--muted-48)">Pregunta lo que quieras sobre esta sesión.</div>';
     cb.className='chatbar';
-    cb.innerHTML=`<input id="cq" placeholder="Pregunta sobre esta sesión…">
-      <button class="pill" onclick="ask()">Enviar</button>`;
+    // Con una pregunta en vuelo el input se apaga: una segunda pisaba la respuesta de la primera
+    cb.innerHTML=`<input id="cq" aria-label="Pregunta sobre esta sesión" ${asking?'disabled':''}
+        placeholder="${asking?'Pensando…':'Pregunta sobre esta sesión…'}">
+      <button class="pill" onclick="ask()" ${asking?'disabled':''}>Enviar</button>`;
     $('#cq').onkeydown=e=>{if(e.key==='Enter')ask();};
     p.scrollTop=p.scrollHeight;
   }
@@ -443,46 +561,104 @@ function newNote(){                       // entrada nueva con la hora, y el cur
   cur.notes=ta.value;pywebview.api.save_notes(cur.id,ta.value);
   ta.focus();ta.selectionStart=ta.selectionEnd=ta.value.length;ta.scrollTop=ta.scrollHeight;
 }
-async function copyTranscript(){
-  const txt=turnsOf(cur).map(x=>(x.who?x.who+': ':'')+x.text).join('\n\n');
-  if(!txt.trim())return;
-  setStatus('Copiando…');
+async function copyText(txt,ok){
+  if(!(txt||'').trim())return;
   const r=await pywebview.api.copy_text(txt);
-  setStatus(r.ok?'Transcripción copiada ✓':(r.msg?'⚠ '+r.msg:'⚠ No se pudo copiar'));
-  setTimeout(()=>setStatus(''),2000);
+  toast(r.ok?ok:(r.msg?'⚠ '+r.msg:'⚠ No se pudo copiar'));
 }
-async function doSummary(){
-  // el stage optimista mete la sesión en el poll, que después trae el progreso real por tramo
-  const m=findMeta(cur.id);cur.stage='Resumiendo…';if(m)m.stage=cur.stage;renderPane();
-  const r=await pywebview.api.summarize(cur.id);
-  cur.stage='';if(m)m.stage='';
-  if(r.ok){cur.summary=r.summary;cur.sum_error=null;}else cur.sum_error=r.msg;
-  renderPane();renderList();
+const copyTranscript=()=>copyText(turnsOf(cur).map(x=>(x.who?x.who+': ':'')+x.text).join('\n\n'),
+                                  'Transcripción copiada ✓');
+async function exportMd(){
+  const r=await pywebview.api.export_md(cur.id);
+  if(r.ok){reveal(r.path);toast('Exportado ✓');}else toast('⚠ No se pudo exportar');
 }
+// Lo que genera la IA tarda: stage optimista para que el poll traiga el progreso real, y al
+// terminar se relee la sesión entera (el acta trae además el título y borra los tildes viejos).
+async function generate(fn,stage){
+  const id=cur.id,m=findMeta(id);cur.stage=stage;if(m)m.stage=stage;renderPane();renderList();
+  const r=await pywebview.api[fn](id);
+  if(m)m.stage='';
+  if(!r.ok)toast('⚠ '+r.msg);
+  if(!cur||cur.id!==id)return renderList();
+  const s=await pywebview.api.get_session(id);
+  if(m)Object.assign(m,{name:s.name,stage:s.stage});
+  freshCur(s);renderList();
+}
+const doSummary=()=>generate('summarize','Resumiendo…');
+const doMinuta=()=>generate('minuta','Redactando minuta…');
 async function ask(){
-  const q=$('#cq').value.trim();if(!q)return;$('#cq').value='';
-  cur.chat=cur.chat||[];cur.chat.push({q,a:'…'});renderPane();setStatus('Pensando…');
-  const r=await pywebview.api.ask(cur.id,q);setStatus('');cur.chat.pop();
-  cur.chat.push({q,a:r.ok?r.a:'⚠ '+r.msg});renderPane();
+  if(asking)return;
+  const q=$('#cq').value.trim();if(!q)return;
+  const s=cur;s.chat=s.chat||[];s.chat.push({q,a:'…'});
+  asking=true;renderPane();
+  let r;
+  try{r=await pywebview.api.ask(s.id,q);}catch(e){r={ok:false,msg:String(e)};}
+  finally{asking=false;}
+  s.chat.pop();s.chat.push({q,a:r.ok?r.a:'⚠ '+r.msg});
+  if(cur&&cur.id===s.id){cur.chat=s.chat;if(tab==='chat'){renderPane();$('#cq').focus();}}
 }
+async function toggleAct(i){
+  const r=await pywebview.api.toggle_done(cur.id,i);
+  if(r.ok)cur.done=r.done;
+  renderPane();
+}
+// Pendientes: las acciones abiertas de todas las sesiones, por responsable. Es lo que hace a un
+// notetaker algo más que un archivo de actas.
+async function showPending(){
+  pendView=true;cur=null;renderList();
+  $('#detail').innerHTML=skeleton;
+  const P=await pywebview.api.pending(),by={};
+  for(const x of P)(by[x.who||'Sin responsable']=by[x.who||'Sin responsable']||[]).push(x);
+  $('#detail').innerHTML=`<div class="dhead"><div class="nm">Pendientes</div>
+      <div class="meta">${P.length} ${P.length===1?'acción abierta':'acciones abiertas'} en todas las sesiones</div></div>
+    <div class="content md">${Object.keys(by).map(w=>`<h4>${esc(w)}</h4><ul>${by[w].map(x=>
+      `<li class="act"><input type="checkbox" aria-label="Hecha"
+         onclick='donePending(${jsarg(x.sid)},${x.i},this)'>${esc(x.text)}
+       <a class="from" onclick='openAct(${jsarg(x.sid)})'>${esc(x.name)} · ${esc(groupOf(x.date))}</a></li>`
+      ).join('')}</ul>`).join('')||'<div class="hint">Nada pendiente ✓</div>'}</div>`;
+}
+async function donePending(sid,i,el){
+  const r=await pywebview.api.toggle_done(sid,i);
+  if(r.ok)el.parentElement.classList.toggle('done',r.done.includes(i));
+}
+function openAct(sid){tab='summary';select(sid);}
 // Nada irreversible sin pasar por acá. El "sí" vive en una variable, no en el DOM: el modal no
 // puede quedar apuntando a una sesión que ya no es la seleccionada.
 let onYes=null;
 function askConfirm(title,text,fn,label){
-  $('#ctitle').textContent=title;$('#ctext').textContent=text;
+  closeMenu();
+  $('#ctitle').textContent=title;$('#ctext').textContent=text;$('#cin').style.display='none';
   // el rojo es para lo irreversible: si la acción no borra nada, el botón no puede parecer que sí
   $('#cyes').textContent=label||'Eliminar';
   $('#cyes').className='pill'+(label?'':' danger');
   onYes=fn;$('#cmask').classList.add('show');}
+function askPrompt(title,text,value,fn,label){  // el mismo modal, con un campo de texto
+  askConfirm(title,text,fn,label);
+  const i=$('#cin');i.style.display='';i.value=value||'';i.focus();i.select&&i.select();
+  i.onkeydown=e=>{if(e.key==='Enter')confirmYes();};}
 function closeConfirm(){$('#cmask').classList.remove('show');onYes=null;}
-function confirmYes(){const f=onYes;closeConfirm();if(f)f();}
+function confirmYes(){const f=onYes,v=$('#cin').value.trim();closeConfirm();if(f)f(v);}
 function del(){
   askConfirm('¿Eliminar "'+(cur.name||'esta sesión')+'"?',
     'Se borra la transcripción, el resumen, las notas y el audio. No se puede deshacer.',doDel);}
 async function doDel(){
-  setStatus('Eliminando…');await pywebview.api.delete_session(cur.id);
-  cur=null;await loadList();setStatus('');
+  setStatus('Eliminando…');
+  const r=await pywebview.api.delete_session(cur.id);setStatus('');
+  if(!r.ok)return toast('⚠ '+r.msg);      // sigue en disco: no hacer como si se hubiera ido
+  cur=null;await loadList();
 }
+// "Los demás" es "Acme" en la reunión con Acme: se cambia en toda la sesión y el acta siguiente
+// ya sale con el nombre real.
+function renameWho(old){
+  askPrompt('¿Cómo se llama «'+old+'»?',
+    'Se cambia en toda la transcripción de esta sesión, y el próximo resumen ya usa el nombre.',
+    old,async v=>{
+      if(!v||v===old)return;
+      const r=await pywebview.api.rename_speaker(cur.id,old,v);
+      if(!r.ok)return toast('⚠ No se pudo renombrar');
+      freshCur(await pywebview.api.get_session(cur.id));
+      toast('Ahora es «'+r.who+'» ✓ Rehacé el resumen para que lo use');
+    },'Renombrar');}
 function reveal(p){pywebview.api.open_path(p,true);}
 function openp(p){pywebview.api.open_path(p,false);}
 
@@ -533,12 +709,12 @@ function resync(){
       renderPane();renderList();
       const r=await pywebview.api.resync(cur.id);
       cur=await pywebview.api.get_session(cur.id);
-      if(!r.ok)setStatus(r.msg||'');
+      if(!r.ok)toast('⚠ '+(r.msg||'No se pudo sincronizar'));
       renderDetail();renderList();
     },'Sincronizar');
 }
 async function retry(){setStatus('Reintentando…');await pywebview.api.retry_transcription(cur.id);
-  cur=await pywebview.api.get_session(cur.id);renderDetail();}
+  cur=await pywebview.api.get_session(cur.id);setStatus('');renderDetail();}
 function rename(el){
   const t=el.textContent.trim().replace(/\s+/g,' ').slice(0,80);  // espejo de clean_name()
   el.textContent=t||cur.name;                    // mostrar exactamente lo que se guarda
@@ -555,10 +731,40 @@ async function toggleFav(id){
 }
 
 // buscador y filtro de favoritos
-let sT;$('#q').oninput=e=>{clearTimeout(sT);sT=setTimeout(()=>{query=e.target.value.trim();cur=null;loadList();},250);};
+let sT;
+$('#q').oninput=e=>{$('#qx').style.display=e.target.value?'':'none';clearTimeout(sT);
+  sT=setTimeout(()=>{query=e.target.value.trim();cur=null;loadList();},250);};
+function clearSearch(){$('#q').value='';$('#qx').style.display='none';
+  if(query){query='';cur=null;loadList();}}
+$('#qx').onclick=clearSearch;
 $('#favf').onclick=()=>{favOnly=!favOnly;$('#favf').className='favf'+(favOnly?' on':'');renderList();};
+$('#pendb').onclick=showPending;
 
 window.refresh=async(sid)=>{await loadList(sid||undefined);};
+
+// --- teclado ---
+function moveSel(d){                     // ↑/↓ en la lista, sin tener que ir al mouse
+  const V=visible();if(!V.length)return;
+  const i=V.findIndex(s=>cur&&s.id===cur.id);
+  const n=V[Math.max(0,Math.min(V.length-1,i<0?0:i+d))];
+  if(n&&(!cur||n.id!==cur.id))select(n.id);}
+const inField=t=>!!t&&(/^(INPUT|TEXTAREA|BUTTON|AUDIO|SELECT)$/.test(t.tagName||'')||t.isContentEditable);
+document.addEventListener('keydown',e=>{
+  const confirmOpen=$('#cmask').classList.contains('show'),setOpen=$('#mask').classList.contains('show');
+  if(e.key==='Escape'){                  // Esc cierra lo de arriba; en el buscador, lo vacía
+    if(confirmOpen)closeConfirm();
+    else if(setOpen)cancelSettings();
+    else if(e.target===$('#q'))clearSearch();
+    else closeMenu();
+    return;}
+  if(confirmOpen||setOpen)return;
+  if(e.ctrlKey&&(e.key==='f'||e.key==='F')){e.preventDefault();$('#q').focus();$('#q').select();return;}
+  if(e.ctrlKey&&/^[1-7]$/.test(e.key)&&cur){e.preventDefault();setTab(TABS[+e.key-1][0]);return;}
+  if(e.ctrlKey||e.altKey||inField(e.target))return;
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();moveSel(e.key==='ArrowDown'?1:-1);}
+  else if(e.key==='Delete'&&cur){e.preventDefault();del();}
+  else if(e.key===' '){const a=$('#pl');if(a){e.preventDefault();a.paused?a.play():a.pause();}}
+});
 
 // settings
 const setDark=d=>document.documentElement.dataset.theme=d?'dark':'light';
@@ -567,9 +773,12 @@ const applyTheme=async()=>setDark(await pywebview.api.is_dark(theme));
 function drawSettings(){
   $('#sw').className='sw'+(keepAudio?' on':'');
   $('#sw2').className='sw'+(labelSp?' on':'');
+  $('#sw').setAttribute?.('aria-checked',String(keepAudio));
+  $('#sw2').setAttribute?.('aria-checked',String(labelSp));
   document.querySelectorAll('#themes button').forEach(b=>b.className=b.dataset.t===theme?'on':'');
 }
 function openSettings(){
+  closeMenu();
   pywebview.api.get_settings().then(s=>{
     keepAudio=s.keep_audio;labelSp=s.label_speakers;theme=s.theme||'auto';
     saved={keepAudio,labelSp,theme};        // para Cancelar
@@ -590,16 +799,27 @@ $('#gear').onclick=openSettings;
 // Traer de vuelta el widget: es el único sitio desde donde se graba, y su ✕ lo cierra del todo.
 async function showWidget(){
   const r=await pywebview.api.open_widget();
-  setStatus(r.msg);setTimeout(()=>setStatus(''),2500);
+  toast(r.msg);
 }
 $('#pill').onclick=showWidget;
-$('#sw').onclick=()=>{keepAudio=!keepAudio;drawSettings();};
-$('#sw2').onclick=()=>{labelSp=!labelSp;drawSettings();};
+const flipKeep=()=>{keepAudio=!keepAudio;drawSettings();},flipLabel=()=>{labelSp=!labelSp;drawSettings();};
+$('#sw').onclick=flipKeep;$('#sw2').onclick=flipLabel;
+$('#sw').onkeydown=e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();flipKeep();}};
+$('#sw2').onkeydown=e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();flipLabel();}};
 $('#mask').onclick=e=>{if(e.target===$('#mask'))cancelSettings();};   // clic fuera = cancelar
 $('#cmask').onclick=e=>{if(e.target===$('#cmask'))closeConfirm();};  // clic fuera = no eliminar
-document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;   // Esc cierra lo de arriba
-  if($('#cmask').classList.contains('show'))closeConfirm();
-  else if($('#mask').classList.contains('show'))cancelSettings();});
+// Primer arranque: que los dos canales entran se comprueba ANTES de grabar una hora
+async function testAudio(){
+  $('#abtn').disabled=true;$('#amsg').className='hint';
+  $('#amsg').textContent='Escuchando 5 s… habla y pon algo a sonar.';
+  let r;try{r=await pywebview.api.test_audio();}catch(e){r={};}
+  $('#abtn').disabled=false;
+  const ok=k=>!!(r[k]&&r[k].ok);
+  for(const k of ['mic','loop'])$('#l'+k).style.width=Math.min(100,((r[k]||{}).level||0)/0.05*100)+'%';
+  $('#amsg').textContent=(ok('mic')?'Micrófono ✓':'Micrófono: sin señal')+' · '
+    +(ok('loop')?'Audio de la PC ✓':'Audio de la PC: sin señal (¿sonaba algo?)');
+  $('#amsg').className='hint '+(ok('mic')&&ok('loop')?'ok':'err');
+}
 async function testKey(){$('#smsg').textContent='Probando…';$('#smsg').className='msg';
   // prueba las dos: la de Gemini es la que va a resumir, así que un dedazo ahí tiene que verse acá
   const r=await pywebview.api.test_key($('#key').value.trim(),$('#gkey').value.trim(),
