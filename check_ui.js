@@ -24,7 +24,8 @@ global.pywebview = { api: {
   delete_session: async id => { if (id === 'enuso') return { ok: false, msg: 'en uso' };
                                 deleted.push(id); return { ok: true }; },
   get_settings: async () => ({ keep_audio: false, label_speakers: true, theme: 'auto',
-                               name: 'Eric', key_set: true }),
+                               edge: 'left', name: 'Eric', key_set: true }),
+  save_settings: async (...a) => { savedArgs = a; return { name: 'Eric' }; },
   delete_audio: async id => { deleted.push('wav:' + id); return { paths: { audio: '' } }; },
   resync: async id => { deleted.push('sync:' + id); return { ok: true }; },
   get_session: async id => ({ id, name: 'Vieja', turns: [], transcript: 'x', paths: {} }),
@@ -32,12 +33,12 @@ global.pywebview = { api: {
   search: async () => [], open_widget: async () => ({ ok: true, msg: 'Widget abierto ✓' }),
   ask: () => new Promise(r => { answer = r; }),
 } };
-let answer;                            // resuelve la pregunta en vuelo del chat
+let answer, savedArgs;                            // resuelve la pregunta en vuelo del chat
 global.setInterval = () => {};
 
 const api = new Function('return (function(){' + js + `
   return {highlight, turnRows, turnsOf, activeTurn, mmss, rename, md, newNote, del,
-          confirmYes, closeConfirm, openSettings, jsarg, delAudio, itemHtml, poll, showWidget,
+          confirmYes, closeConfirm, openSettings, setEdge, saveSettings, cancelSettings, getEdge:()=>edge, jsarg, delAudio, itemHtml, poll, showWidget,
           resync, setQuery:q=>query=q, setCur:c=>cur=c, sess:s=>sessions=s, setMe:n=>myName=n,
           setTab:t=>tab=t, getCur:()=>cur, noteMarks, groupOf, ask, renderPane};})()`)();
 
@@ -287,5 +288,11 @@ assert.strictEqual(els['#ta'].value.match(/— \d\d:\d\d —/g).length, 2);
   assert.ok(shown('#mask'), 'el modal de configuración tiene que abrirse');
   await new Promise(r => setTimeout(r, 0));
   assert.strictEqual(els['#me'].value, 'Eric');
+  // Posición del widget: viene del backend, Cancelar la deshace y Guardar la manda
+  assert.strictEqual(api.getEdge(), 'left');
+  api.setEdge('bottom'); api.cancelSettings();
+  assert.strictEqual(api.getEdge(), 'left', 'cancelar deshace la posición elegida');
+  api.setEdge('bottom'); await api.saveSettings();
+  assert.strictEqual(savedArgs[7], 'bottom', 'save_settings recibe el borde (8.º argumento)');
   console.log('check ui ok');
 })();

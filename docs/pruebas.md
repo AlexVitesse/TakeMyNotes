@@ -32,7 +32,7 @@ Qué cubre, por área:
 | Persistencia | DPAPI ida y vuelta; key nunca en claro; `_plain` sin bucle de escritura |
 | Índice | FTS5: AND, prefijo, título, notas, borrado |
 | API de la ventana | lista (con caché y `nosum`), búsqueda, notas, renombrar sesión y hablante, favoritos, reintentos, exportar `.md`, rutas, servidor de medios con Range y sus rechazos (token, `..`, subcarpetas) |
-| Widget | geometría del pill; clics; arrastre; mute y pausa; niveles en vivo; aviso de canal mudo; tooltips; atajo global (con `toggle` falso); protocolo de cierre |
+| Widget | geometría del notch; clics; arrastre; mute y pausa; niveles en vivo; aviso de canal mudo; tooltips; atajo global (con `toggle` falso); protocolo de cierre; plegado, _peek_, ocupado y fijado; los cuatro bordes; `edge` en `save_settings` |
 
 ## `node check_ui.js`
 
@@ -48,7 +48,7 @@ selector) y un `pywebview.api` falso.
 | Confirmaciones | eliminar, borrar audio y sincronizar no llaman al backend sin confirmar; si eliminar falla, la sesión sigue |
 | Poll | el último tramo llega al detalle; **escribiendo no se repinta** y no se pierden las notas sin guardar |
 | Chat | el input se apaga en vuelo y una segunda pregunta se ignora |
-| Varios | renombrar título (normalización), `jsarg` con rutas de Windows, «+ Nueva nota», widget, Configuración |
+| Varios | renombrar título (normalización), `jsarg` con rutas de Windows, «+ Nueva nota», widget, Configuración (incluida la posición del widget: Cancelar y Guardar) |
 
 ## Lo que hay que probar a mano
 
@@ -57,6 +57,8 @@ Lo que depende de layout, de hardware o de servicios reales:
 - **3.5**: pestaña Transcripción con audio → ⚙. El reproductor tiene que quedar velado.
 - **Nivel en vivo y Probar audio**: hablar y poner algo a sonar.
 - **Ctrl+Shift+R** desde otra app.
+- **Notch** en los cuatro bordes: abrir al acercar el mouse, plegar al irse, arrastrar, clic
+  derecho para fijar, tooltips y bloc del lado de adentro.
 - **Instalador**: instalar, usar cada acceso del menú Inicio, actualizar con la app abierta,
   desinstalar y comprobar que `notas\` sigue.
 - **Calidad del acta y de la minuta**: con 3 reuniones reales (una corta, una con eco, una larga),

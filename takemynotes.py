@@ -3212,6 +3212,11 @@ def selftest():
     assert search_index("presupuesto clima") == []                # AND, no OR
 
     api = Api()                                                   # la capa que consume la UI
+    th = load_settings()["theme"]                                 # posición del widget:
+    assert api.save_settings(True, True, "", th, edge="left")["edge"] == "left"
+    assert api.save_settings(True, True, "", th, edge="arriba")["edge"] == "left"   # inválido: no toca
+    assert api.save_settings(True, True, "", th)["edge"] == "left"                  # None: no toca
+    api.save_settings(True, True, "", th, edge="top")
     assert [m["id"] for m in api.list_sessions()] == ["s2", "s1"]  # más nueva primero
     assert api.search("presupuesto")[0]["id"] == "s1"
     assert api.search("  ")[0]["id"] == "s2"                       # búsqueda vacía = listado

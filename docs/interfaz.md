@@ -2,17 +2,26 @@
 
 ## Widget (`class Widget`, Tkinter)
 
-Un notch estilo [codenotch](https://github.com/vinzdg/codenotch) pegado a un borde de la pantalla,
-al centro, siempre encima. El borde se elige en Configuración → «Posición del widget»
-(`edge` en `settings.json`: arriba, abajo —sobre la barra de tareas—, izquierda o derecha); en
-los lados va en columna, con reloj, barritas y estado apilados. Descansa **plegado** (pestañita de 79 × 10 con un punto de estado: rojo
-grabando, ámbar aviso, nada parado) y se **despliega** (400 × 54, plano arriba, esquinas de abajo
-de 20 px y orejas cóncavas donde toca el borde) al acercar el mouse o cuando hay algo nuevo
-(`_peek`: se abre 2,5 s). No se pliega mientras `_busy()` (aviso, sin señal, mensaje, pausa,
-transcribiendo, bloc abierto). Clic derecho lo deja fijo abierto; el asa lo arrastra solo a lo largo
-de su borde. Tooltips y bloc de notas salen del lado de adentro de la pantalla. La distribución es fija: los botones de sesión se dibujan siempre y se apagan cuando no se graba
-(el pill no cambia de forma). Las coordenadas de cada control están en la clase (`MIC`, `REC`,
-`LVL`…) y `selftest` comprueba que ningún halo se pise con otro ni se salga del pill.
+Un notch estilo [codenotch](https://github.com/vinzdg/codenotch) pegado al centro de un borde de
+la pantalla, siempre encima. El borde se elige en Configuración → «Posición del widget» (`edge` en
+`settings.json`): arriba, abajo (sobre la barra de tareas), izquierda o derecha. En los lados va en
+columna, con reloj, barritas y estado apilados. Detalle y por qué de cada decisión en
+[notch-2026-09-30.md](notch-2026-09-30.md).
+
+- **Plegado:** una pestañita de 79 × 10 con un punto de estado (rojo grabando, ámbar aviso, nada
+  parado).
+- **Desplegado:** 400 × 54, plano del lado del borde, esquinas de 20 px del otro y orejas cóncavas
+  donde toca el borde.
+- **Se abre** al acercar el mouse, o solo durante 2,5 s cuando hay algo nuevo (`_peek`).
+- **No se pliega** mientras `_busy()`: aviso, sin señal, mensaje, pausa, transcribiendo o bloc
+  abierto. Clic derecho lo deja fijo abierto.
+- **El asa** lo arrastra solo a lo largo de su borde. Tooltips y bloc de notas salen del lado de
+  adentro de la pantalla.
+
+La distribución es fija: los botones de sesión se dibujan siempre y se apagan cuando no se graba
+(el notch no cambia de forma). Las coordenadas de cada control están en la clase (`MIC`, `REC`,
+`LVL`…) medidas **a lo largo** del notch; `_at` / `_pt` las llevan al borde que toque, y
+`selftest` comprueba que ningún halo se pise con otro ni se salga del cuerpo.
 
 | Control | Qué hace |
 |---------|----------|
@@ -34,7 +43,9 @@ mensajes, que solo levanta `_hot`; `_loop` lo atiende en el hilo de Tk (hasta 50
 Si otra app ya tiene el atajo, no hay atajo y queda un warning en el log.
 
 **Cerrar desde afuera**: `root.protocol("WM_DELETE_WINDOW")` lleva a `_quit`, así el
-`WM_CLOSE` de `--quit` (menú Inicio, instalador) pregunta igual que el ✕.
+`WM_CLOSE` de `--quit` (menú Inicio, instalador) pregunta igual que el ✕. `_quit` destruye la
+ventana con `after_idle`: hacerlo dentro del clic del ✕ corrompía la memoria de Tcl y el proceso
+moría al cerrar.
 
 ## Ventana (`ui/index.html`, pywebview)
 
