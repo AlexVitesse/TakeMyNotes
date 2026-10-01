@@ -117,7 +117,8 @@ se dijo. El próximo resumen ya usa el nombre; el acta existente no cambia hasta
 
 Dos bloques:
 
-- **General**: guardar audio, identificar hablantes, tema, tu nombre y **Probar micro y audio de
+- **General**: guardar audio, identificar hablantes, tema, **posición del widget** (arriba,
+  abajo, izquierda, derecha), tu nombre y **Probar micro y audio de
   la PC** (`Api.test_audio`: 5 s de cada canal, sin guardar nada; muestra el nivel y si hubo voz).
 - **Inteligencia artificial**: key de Groq, key de Gemini (con una línea de privacidad visible y
   el detalle plegado en «¿Por qué opcional?»), y modelo para los resúmenes.

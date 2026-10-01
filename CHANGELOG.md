@@ -7,7 +7,7 @@ El detalle y el *por qué* de cada decisión están en los mensajes de commit (`
 
 ### Cambiado
 
-- El widget es un notch pegado al borde superior, estilo codenotch: plegado a una pestañita, se
+- El widget es un notch pegado a un borde de la pantalla (arriba por defecto), estilo codenotch: plegado a una pestañita, se
   abre al acercar el mouse o cuando hay algo nuevo. Negro puro en tema oscuro.
 
 ### Agregado

@@ -252,6 +252,7 @@ antes de grabar una reunión entera.
 | `keep_audio`     | `true`  | Conservar el `.wav` tras transcribir (~2 MB/min) para auditar.  |
 | `label_speakers` | `true`  | Etiquetar "Yo" vs "Los demás".                                  |
 | `theme`          | `auto`  | `auto` (sigue a Windows) · `light` · `dark`.                    |
+| `edge`           | `top`   | Borde del widget: `top` · `bottom` · `left` · `right`.          |
 | `name`           | —       | Tu nombre: etiqueta tus turnos y marca tus menciones.           |
 
 La key se cifra con **DPAPI** (`CryptProtectData`, vía `ctypes`): solo la puede descifrar **tu

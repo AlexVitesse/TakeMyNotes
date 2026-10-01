@@ -100,7 +100,7 @@ girando. Windows recicla PIDs, así que un PID reusado se ve vivo: en el peor ca
 ## Configuración — `save_settings`, `load_settings`
 
 `settings.json` se escribe igual de atómico. El widget lo relee cuando cambia su `mtime` (para el
-tema). Si DPAPI falla, la key se guarda en claro y se marca `"_plain": true`, para que leer la
+tema y el borde del notch, `edge`: si cambió, `_place()` lo muda sin reiniciar). Si DPAPI falla, la key se guarda en claro y se marca `"_plain": true`, para que leer la
 configuración no intente migrarla (y reescribir el archivo) en cada lectura.
 
 ## Cómo se prueba
